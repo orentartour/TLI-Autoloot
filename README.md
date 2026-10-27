@@ -1,36 +1,56 @@
 # TLI Autoloot
 
-Tray tool for Torchlight Infinite:
+A small tray helper for Torchlight Infinite. While the game is the active
+window it:
 
-- Spams Q (every 0.1s) while the game is focused and no menu is open. Menus are
-  detected by the flame icon in the top-right HUD disappearing.
-- Auto chest/mechanics: presses D while the grey finger icon above the D slot
-  is on screen, except while the DPS meter panel is open.
-- Spin-off **TLI Autoloot A** adds IRIS 2 auto blink. When the skill's yellow
-  charge badge (in any skill slot) shows 0, Blink (A) is pressed according to
-  the mode:
-  - `+` presses Blink automatically
-  - `=` presses Blink on each right click
-  - `-` is off
-- Options panel (left-click the tray icon): rebind Pause, Spam, Loot and Blink,
-  toggle chests & mechanics, and pick the IRIS 2 auto blink mode.
+- **Spams Q** every 0.1s. It stops while a menu is open, which it detects when
+  the flame icon in the top-right HUD disappears.
+- **Auto loots:** presses D while the grey finger icon above the D slot is on
+  screen, but not while the DPS meter panel is open.
 
-## Hotkeys
+**TLI Autoloot A** is a spin-off that adds **IRIS 2 auto blink**. When a skill's
+yellow charge badge reads 0, it presses Blink (A):
 
-| Key | Action |
+| Mode | Blink |
 | --- | --- |
-| F8 (rebindable) | Pause / resume everything |
-| Ctrl+F11 | Recapture the flame HUD icon |
-| Ctrl+F9 / Ctrl+F10 | Add / clear extra menu spots |
+| `+` | pressed automatically |
+| `=` | pressed on each right click |
+| `-` | off |
+
+## Download
+
+Get `TLI-Autoloot.exe` or `TLI-Autoloot-A.exe` from the
+[latest release](https://github.com/orentartour/TLI-Autoloot/releases/latest)
+and run it. Run only one of the two at a time.
+
+The game runs as admin, so the app needs admin too. The first launch asks once
+and sets up a scheduled task, so later launches don't show a prompt.
+
+## Hotkey
+
+**F8** pauses and resumes everything. You can rebind it in Options.
+
+## Options
+
+Left-click the tray icon to open the Options panel. From there you can:
+
+- rebind Pause / resume (F8 by default), Spam, Loot and Blink: click a key,
+  then press the new one (Esc cancels)
+- switch chests & mechanics looting on or off
+- pick the IRIS 2 auto blink mode (spin-off only)
+
+The default keys are the AZERTY positions of Q and A. On QWERTY, rebind Spam
+and Blink once.
+
+Settings are saved in `%APPDATA%\TLI Autoloot`.
 
 ## Build
 
 ```powershell
-.\build.ps1      # TLI Autoloot
-.\build.ps1 -A   # the TLI Autoloot A spin-off
-# needs Python 3.13 with pystray, Pillow and PyInstaller
+.\build.ps1      # TLI-Autoloot.exe
+.\build.ps1 -A   # TLI-Autoloot-A.exe
 ```
 
-The game runs elevated, so the app needs admin too. On first launch it asks
-once and registers a "TLI Autoloot" scheduled task to start elevated afterwards.
-Settings and templates live in `%APPDATA%\TLIQSpam`.
+You need Python 3.13 with pystray, Pillow and PyInstaller. Screen positions
+assume the game's UI at 2560x1440; other resolutions are scaled by window
+height.

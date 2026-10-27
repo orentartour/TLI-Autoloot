@@ -1,24 +1,16 @@
-"""TLI Autoloot: Torchlight Infinite Q spammer with auto chest/mechanics.
+"""TLI Autoloot: a tray helper for Torchlight Infinite.
 
-Presses Q every 0.1s while Torchlight Infinite is the active window and the
-flame icon in the top-right corner of the HUD is visible. When a menu opens
-and that icon disappears, it stops.
+While the game is the active window:
+- Spams Q every 0.1s, and stops while a menu is open (the flame icon in the
+  top-right HUD disappears).
+- Auto loot: presses D while the grey finger icon above the D slot shows,
+  except while the DPS meter panel is open.
+- Spin-off "TLI Autoloot A" (tli_autoloot_a.py), IRIS 2 auto blink: when a
+  skill's yellow charge badge reads 0, presses Blink (A), either by itself
+  ("+") or on each right click ("="), or never ("-").
 
-The icon is matched against a reference image in templates/. If detection
-ever drifts (new resolution, UI scale), stand in game with the icon visible
-and press Ctrl+F11 to recapture it.
-
-Optional extra menu spots, for menus that leave the icon visible:
-  open the menu, hover a distinctive static spot of it, press Ctrl+F9.
-  Ctrl+F10 clears those spots.
-F8 pauses / resumes spamming at any time.
-
-Auto chest/mechanics: while spamming is on (not paused, game focused) and the
-grey finger icon above the D slot is showing, presses D. Keys and the on/off
-switch are in the Options window (left-click the tray icon).
-
-Spin-off "TLI Autoloot A" (tli_autoloot_a.py): also presses A while the skill
-in slot A shows 0 charges on its yellow badge.
+F8 pauses / resumes everything. Keys, the auto loot switch and the blink mode
+are in the Options panel (left-click the tray icon).
 
 Tray icon colour: green = spamming, orange = menu open,
 grey = game not focused, red = paused.
@@ -40,50 +32,52 @@ import pystray
 from PIL import Image, ImageChops, ImageDraw, ImageGrab, ImageStat, ImageTk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# Built as an exe: bundled files are unpacked to a temp dir, so settings and
-# templates live in %APPDATA% and the bundled templates seed them on first run.
+# Built as an exe: bundled files are unpacked to a temp dir; settings live in
+# %APPDATA%.
 BUNDLE_DIR = getattr(sys, "_MEIPASS", HERE)
+TEMPLATE_DIR = os.path.join(BUNDLE_DIR, "templates")
 if getattr(sys, "frozen", False):
-    DATA_DIR = os.path.join(os.environ["APPDATA"], "TLIQSpam")
+    DATA_DIR = os.path.join(os.environ["APPDATA"], "TLI Autoloot")
+    OLD_DATA_DIR = os.path.join(os.environ["APPDATA"], "TLIQSpam")  # before 2.1
 else:
-    DATA_DIR = HERE
+    DATA_DIR = OLD_DATA_DIR = HERE
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 APP_NAME = "TLI Autoloot"
 TASK_NAME = "TLI Autoloot"
 # Set by the spin-off entry point (tli_autoloot_a.py).
 A_ON_ZERO = False
-TEMPLATE_DIR = os.path.join(DATA_DIR, "templates")
 
+GAME_PROCESS = "torchlight_infinite.exe"
 DEFAULT_CONFIG = {
-    "process_name": "torchlight_infinite.exe",
     "interval_seconds": 0.1,
     "key_scancode": 0x1E,  # physical key that types Q on AZERTY
-    "color_tolerance": 20,
-    "menu_points": [],
-    # Flame icon in the top-right HUD, in client pixels of a 2560x1440 window.
-    # It is anchored to the right edge, so x is measured from that edge.
-    "hud_boxes": [[2476, 20, 2528, 74]],
-    "hud_reference_size": [2560, 1440],
-    "hud_match_threshold": 0.45,
     "pause_vk": 0x77,  # F8
     "auto_enabled": True,
     "auto_scancode": 0x20,  # D
     "auto_interval_seconds": 0.3,
-    # Max grey difference to the template, as a fraction of the template's own
-    # contrast: ~0 is a perfect match, ~1 is a flat patch of its average colour.
-    "auto_match_ratio": 0.5,
     "zero_scancode": 0x10,  # physical key that types A on AZERTY
     "zero_interval_seconds": 0.5,
     "iris_mode": "=",  # IRIS 2 auto blink: "+" auto, "=" on right click, "-" off
 }
 
+# Positions are in pixels of the game at 2560x1440; the UI scales with the
+# window height.
+REF_HEIGHT = 1440
+# Flame icon in the top-right HUD. Anchored to the right edge, so x0/x1 are
+# measured back from it.
+FLAME_BOX = (84, 20, 32, 74)
+# Share of the icon's bright outline that must line up to count as visible.
+FLAME_MATCH = 0.45
 # The icon's outline is light yellow; its orange glow stays below this.
 BRIGHTNESS = 170
-# How far (px) the icon may shift from its saved position and still match.
+# How far (px) the icon may shift from its spot and still match.
 SEARCH_MARGIN = 6
 # Consecutive missed icon checks before calling it a menu (ignores flashes).
 MISSES_FOR_MENU = 3
 HUD_CHECK_INTERVAL = 0.05
+# Max grey difference to the finger icon, as a fraction of the icon's own
+# contrast: ~0 is a perfect match, ~1 is a flat patch of its average colour.
+AUTO_MATCH_RATIO = 0.5
 # Finger icon above the D slot: always at the same spot, given in pixels of a
 # 1440-high window from its bottom centre, and the half-size of the square
 # compared there.
@@ -106,11 +100,7 @@ CHARGE_SIZE = (14, 16)
 CHARGE_MIN_SCORE = 0.6
 CHARGE_MIN_LEAD = 0.3
 
-# Offsets sampled around each extra menu spot; all must match.
-SAMPLE_OFFSETS = [(0, 0), (-4, 0), (4, 0), (0, -4), (0, 4)]
-
-VK_RBUTTON = 0x02
-VK_CONTROL, VK_ESCAPE, VK_F9, VK_F10, VK_F11 = 0x11, 0x1B, 0x78, 0x79, 0x7A
+VK_RBUTTON, VK_ESCAPE = 0x02, 0x1B
 # Keys a pause bind can use: everything except mouse buttons.
 BINDABLE_VKS = [vk for vk in range(0x08, 0xFF) if vk != VK_ESCAPE]
 # Keys whose name lookup needs the "extended" flag (arrows, Insert, ...).
@@ -118,7 +108,6 @@ EXTENDED_VKS = set(range(0x21, 0x2F)) | {0x5B, 0x5C, 0x5D, 0x6F, 0x90}
 WIN_VKS = {0x5B, 0x5C}
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
-gdi32 = ctypes.WinDLL("gdi32")
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 # Physical pixel coordinates, so positions work on scaled displays.
@@ -127,10 +116,6 @@ try:
 except Exception:
     user32.SetProcessDPIAware()
 
-user32.GetDC.restype = wt.HDC
-user32.ReleaseDC.argtypes = [wt.HWND, wt.HDC]
-gdi32.GetPixel.argtypes = [wt.HDC, ctypes.c_int, ctypes.c_int]
-gdi32.GetPixel.restype = wt.DWORD
 user32.GetForegroundWindow.restype = wt.HWND
 kernel32.OpenProcess.restype = wt.HANDLE
 
@@ -205,22 +190,8 @@ def client_size(hwnd):
     return rect.right - rect.left, rect.bottom - rect.top
 
 
-def cursor_pos():
-    pt = wt.POINT()
-    user32.GetCursorPos(ctypes.byref(pt))
-    return pt.x, pt.y
-
-
-def read_pixels(coords):
-    hdc = user32.GetDC(None)
-    try:
-        out = []
-        for x, y in coords:
-            c = gdi32.GetPixel(hdc, x, y)
-            out.append((c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF))
-        return out
-    finally:
-        user32.ReleaseDC(None, hdc)
+def ui_scale(hwnd):
+    return client_size(hwnd)[1] / REF_HEIGHT
 
 
 def key_down(vk):
@@ -277,16 +248,8 @@ def best_overlap(ref, area):
     return best
 
 
-def template_path(i):
-    return os.path.join(TEMPLATE_DIR, f"hud_{i}.png")
-
-
-def save_templates(source, boxes, offset=(0, 0)):
-    """Crop each box out of source (a PIL image) and store it as a template."""
-    os.makedirs(TEMPLATE_DIR, exist_ok=True)
-    ox, oy = offset
-    for i, (x0, y0, x1, y1) in enumerate(boxes):
-        source.crop((x0 - ox, y0 - oy, x1 - ox, y1 - oy)).save(template_path(i))
+def load_flame_template():
+    return bright_mask(Image.open(os.path.join(TEMPLATE_DIR, "flame.png")))
 
 
 def half_size(img):
@@ -296,8 +259,7 @@ def half_size(img):
 
 def load_auto_template():
     """The finger icon in grey (half size), with its mean deviation from its average."""
-    path = os.path.join(BUNDLE_DIR, "templates", "auto.png")
-    img = half_size(Image.open(path).convert("L"))
+    img = half_size(Image.open(os.path.join(TEMPLATE_DIR, "auto.png")).convert("L"))
     flat = Image.new("L", img.size, round(ImageStat.Stat(img).mean[0]))
     return img, max(ImageStat.Stat(ImageChops.difference(img, flat)).mean[0], 1.0)
 
@@ -311,28 +273,27 @@ def normalised(img):
 
 
 def load_charge_templates():
-    return {d: normalised(half_size(Image.open(
-                os.path.join(BUNDLE_DIR, "templates", f"charge_{d}.png"))))
+    return {d: normalised(half_size(Image.open(os.path.join(TEMPLATE_DIR, f"charge_{d}.png"))))
             for d in "012"}
-
-
-def load_templates(count):
-    bundled = os.path.join(BUNDLE_DIR, "templates")
-    if not os.path.isdir(TEMPLATE_DIR) and os.path.isdir(bundled):
-        shutil.copytree(bundled, TEMPLATE_DIR)
-    try:
-        return [bright_mask(Image.open(template_path(i))) for i in range(count)]
-    except FileNotFoundError:
-        return None
 
 
 # --- Config ------------------------------------------------------------------
 
 def load_config():
+    # Settings from before 2.1 lived in %APPDATA%\TLIQSpam: keep the keys.
+    if not os.path.exists(CONFIG_PATH) and os.path.isdir(OLD_DATA_DIR) \
+            and OLD_DATA_DIR != DATA_DIR:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        old = os.path.join(OLD_DATA_DIR, "config.json")
+        if os.path.exists(old):
+            shutil.copy(old, CONFIG_PATH)
+        shutil.rmtree(OLD_DATA_DIR, ignore_errors=True)
     cfg = dict(DEFAULT_CONFIG)
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
-            cfg.update(json.load(f))
+            saved = json.load(f)
+        # Only known settings: drops ones older versions left behind.
+        cfg.update({k: v for k, v in saved.items() if k in DEFAULT_CONFIG})
     except FileNotFoundError:
         pass
     save_config(cfg)
@@ -397,7 +358,7 @@ def hex_color(rgb):
 class OptionsWindow:
     """Small borderless always-on-top panel: keys, the auto loot switch and,
     in the spin-off, the IRIS 2 auto blink mode. Tk lives in its own thread
-    and re-reads the spammer's state every 100ms."""
+    and re-reads the app state every 100ms."""
 
     def __init__(self, app):
         self.app = app
@@ -588,12 +549,12 @@ class OptionsWindow:
 
 # --- Main logic ----------------------------------------------------------------
 
-class Spammer:
+class Autoloot:
     def __init__(self):
         self.cfg = load_config()
-        self.templates = load_templates(len(self.cfg["hud_boxes"]))
+        self.flame = load_flame_template()
         self.paused = False
-        self.rebinding = None  # "pause", "spam" or "auto" while waiting for a key
+        self.rebinding = None  # a BINDS / SEND_KEYS name while waiting for a key
         self.auto_template = load_auto_template()
         self.next_auto = 0.0
         self.next_zero = 0.0
@@ -607,97 +568,31 @@ class Spammer:
         self.hud_misses = MISSES_FOR_MENU
         self.next_hud_check = 0.0
 
-    def scaled_boxes(self, hwnd):
-        """HUD boxes in screen coordinates for the current window size."""
-        ref_w, ref_h = self.cfg["hud_reference_size"]
+    def flame_visible(self, hwnd):
         w, h = client_size(hwnd)
-        s = h / ref_h  # the UI scales with window height
+        s = ui_scale(hwnd)
         ox, oy = client_origin(hwnd)
         right = ox + w
-        return [[round(right - (ref_w - x0) * s), round(oy + y0 * s),
-                 round(right - (ref_w - x1) * s), round(oy + y1 * s)]
-                for x0, y0, x1, y1 in self.cfg["hud_boxes"]]
-
-    def hud_visible(self, hwnd):
-        if not self.templates:
-            return True  # nothing to compare against: don't block spamming
-        boxes = self.scaled_boxes(hwnd)
+        x0, y0, x1, y1 = FLAME_BOX
         m = SEARCH_MARGIN
-        left = min(b[0] for b in boxes) - m
-        top = min(b[1] for b in boxes) - m
-        right = max(b[2] for b in boxes) + m
-        bottom = max(b[3] for b in boxes) + m
-        shot = ImageGrab.grab(bbox=(left, top, right, bottom), all_screens=True)
-        scores = []
-        for ref, (x0, y0, x1, y1) in zip(self.templates, boxes):
-            sub = bright_mask(shot.crop((x0 - left - m, y0 - top - m,
-                                         x1 - left + m, y1 - top + m)))
-            if sub[0] < ref[0] or len(sub[1]) < len(ref[1]):
-                return True  # window size changed since capture; Ctrl+F11 fixes it
-            scores.append(best_overlap(ref, sub))
-        return sum(scores) / len(scores) >= self.cfg["hud_match_threshold"]
-
-    def menu_spot_matches(self, hwnd):
-        ox, oy = client_origin(hwnd)
-        tol = self.cfg["color_tolerance"]
-        for p in self.cfg["menu_points"]:
-            coords = [(ox + p["x"] + dx, oy + p["y"] + dy) for dx, dy in SAMPLE_OFFSETS]
-            live = read_pixels(coords)
-            if all(max(abs(a - b) for a, b in zip(px, ref)) <= tol
-                   for px, ref in zip(live, p["colors"])):
-                return True
-        return False
+        area = bright_mask(ImageGrab.grab(
+            bbox=(round(right - x0 * s) - m, round(oy + y0 * s) - m,
+                  round(right - x1 * s) + m, round(oy + y1 * s) + m), all_screens=True))
+        if area[0] < self.flame[0] or len(area[1]) < len(self.flame[1]):
+            return True  # window too small to compare: don't block spamming
+        return best_overlap(self.flame, area) >= FLAME_MATCH
 
     def menu_open(self, hwnd):
         now = time.perf_counter()
         if now >= self.next_hud_check:
             self.next_hud_check = now + HUD_CHECK_INTERVAL
-            self.hud_misses = 0 if self.hud_visible(hwnd) else self.hud_misses + 1
-        return self.hud_misses >= MISSES_FOR_MENU or self.menu_spot_matches(hwnd)
-
-    def game_window(self):
-        hwnd, name = foreground_process_name()
-        if name != self.cfg["process_name"]:
-            winsound.Beep(300, 250)
-            return None
-        return hwnd
-
-    def recapture_hud(self):
-        hwnd = self.game_window()
-        if not hwnd:
-            return
-        boxes = self.scaled_boxes(hwnd)
-        left = min(b[0] for b in boxes)
-        top = min(b[1] for b in boxes)
-        shot = ImageGrab.grab(bbox=(left, top, max(b[2] for b in boxes),
-                                    max(b[3] for b in boxes)), all_screens=True)
-        save_templates(shot, boxes, offset=(left, top))
-        self.templates = load_templates(len(boxes))
-        winsound.Beep(1200, 120)
-        winsound.Beep(1500, 120)
-
-    def add_menu_point(self):
-        hwnd = self.game_window()
-        if not hwnd:
-            return
-        cx, cy = cursor_pos()
-        ox, oy = client_origin(hwnd)
-        colors = read_pixels([(cx + dx, cy + dy) for dx, dy in SAMPLE_OFFSETS])
-        self.cfg["menu_points"].append(
-            {"x": cx - ox, "y": cy - oy, "colors": [list(c) for c in colors]})
-        save_config(self.cfg)
-        winsound.Beep(1200, 120)
-
-    def clear_menu_points(self):
-        self.cfg["menu_points"] = []
-        save_config(self.cfg)
-        winsound.Beep(600, 120)
-        winsound.Beep(400, 120)
+            self.hud_misses = 0 if self.flame_visible(hwnd) else self.hud_misses + 1
+        return self.hud_misses >= MISSES_FOR_MENU
 
     def auto_box(self, hwnd):
         """Screen box around the finger icon for the current window size."""
         w, h = client_size(hwnd)
-        s = h / self.cfg["hud_reference_size"][1]
+        s = ui_scale(hwnd)
         ox, oy = client_origin(hwnd)
         dx, dy = AUTO_CENTER
         cx, cy = round(ox + w / 2 + dx * s), round(oy + h + dy * s)
@@ -709,12 +604,12 @@ class Spammer:
         if area.size != tpl.size:
             area = area.resize(tpl.size, Image.BOX)  # window isn't 1440 high
         diff = ImageStat.Stat(ImageChops.difference(area, tpl)).mean[0]
-        return diff <= contrast * self.cfg["auto_match_ratio"]
+        return diff <= contrast * AUTO_MATCH_RATIO
 
     def charges_at_zero(self, hwnd):
         """True when any skill slot's charge badge reads 0."""
         w, h = client_size(hwnd)
-        s = h / self.cfg["hud_reference_size"][1]
+        s = ui_scale(hwnd)
         ox, oy = client_origin(hwnd)
         cx, by = ox + w / 2, oy + h
         bw, bh = CHARGE_SIZE
@@ -740,7 +635,7 @@ class Spammer:
         return False
 
     def dps_panel_open(self, hwnd):
-        s = client_size(hwnd)[1] / self.cfg["hud_reference_size"][1]
+        s = ui_scale(hwnd)
         ox, oy = client_origin(hwnd)
         x0, y0, x1, y1 = (round(v * s) for v in PANEL_REGION)
         shot = ImageGrab.grab(bbox=(ox + x0, oy + y0, ox + x1, oy + y1),
@@ -812,17 +707,9 @@ class Spammer:
         if self.rebinding:
             return self.poll_rebind(prev)
         pause_vk = self.cfg["pause_vk"]
-        now = {vk: key_down(vk) for vk in (pause_vk, VK_F9, VK_F10, VK_F11)}
-        ctrl = key_down(VK_CONTROL)
-        pressed = lambda vk: now[vk] and not prev.get(vk, True)
-        if pressed(pause_vk):
+        now = {pause_vk: key_down(pause_vk)}
+        if now[pause_vk] and not prev.get(pause_vk, True):
             self.toggle_pause()
-        if ctrl and pressed(VK_F9):
-            self.add_menu_point()
-        if ctrl and pressed(VK_F10):
-            self.clear_menu_points()
-        if ctrl and pressed(VK_F11):
-            self.recapture_hud()
         return now
 
     def loop(self):
@@ -833,7 +720,7 @@ class Spammer:
             hwnd, name = foreground_process_name()
             if self.paused:
                 state = "paused"
-            elif name != self.cfg["process_name"]:
+            elif name != GAME_PROCESS:
                 state = "unfocused"
             elif self.menu_open(hwnd):
                 state = "menu"
@@ -941,10 +828,10 @@ def main():
 
     # One instance only: a second launch just exits. Taken after the relaunch
     # so the elevated copy isn't locked out by the copy that started it.
-    kernel32.CreateMutexW(None, False, "Global\\TLI_QSpam_SingleInstance")
+    kernel32.CreateMutexW(None, False, "Global\\TLI_Autoloot_SingleInstance")
     if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
         sys.exit(0)
-    Spammer().run()
+    Autoloot().run()
 
 
 if __name__ == "__main__":
