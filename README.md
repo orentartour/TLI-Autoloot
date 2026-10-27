@@ -4,7 +4,8 @@ Tray tool for Torchlight Infinite:
 
 - Spams Q (every 0.1s) while the game is focused and no menu is open. Menus are
   detected by the flame icon in the top-right HUD disappearing.
-- Auto chest/mechanics: presses D while the grey finger icon is on screen.
+- Auto chest/mechanics: presses D while the grey finger icon above the D slot
+  is on screen (it always appears at the same spot).
 - Options window (left-click the tray icon, or right-click > Options): rebind the pause, spam and auto
   keys, and turn auto chest/mechanics on or off.
 
@@ -13,7 +14,6 @@ Tray tool for Torchlight Infinite:
 | Key | Action |
 | --- | --- |
 | F8 (rebindable) | Pause / resume everything |
-| Ctrl+F12 | Capture the finger icon (hover it first) |
 | Ctrl+F11 | Recapture the flame HUD icon |
 | Ctrl+F9 / Ctrl+F10 | Add / clear extra menu spots |
 

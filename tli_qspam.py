@@ -14,9 +14,8 @@ Optional extra menu spots, for menus that leave the icon visible:
 F8 pauses / resumes spamming at any time.
 
 Auto chest/mechanics: while spamming is on (not paused, game focused) and the
-grey finger icon is showing, presses D. Hover the icon and press Ctrl+F12 to
-capture it. Keys and the on/off switch are in the Options window (left-click
-the tray icon).
+grey finger icon above the D slot is showing, presses D. Keys and the on/off
+switch are in the Options window (left-click the tray icon).
 
 Tray icon colour: green = spamming, orange = menu open,
 grey = game not focused, red = paused.
@@ -46,7 +45,6 @@ if getattr(sys, "frozen", False):
 else:
     DATA_DIR = HERE
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
-LOG_PATH = os.path.join(DATA_DIR, "autoloot.log")
 TASK_NAME = "TLI Autoloot"
 TEMPLATE_DIR = os.path.join(DATA_DIR, "templates")
 
@@ -65,9 +63,6 @@ DEFAULT_CONFIG = {
     "auto_enabled": True,
     "auto_scancode": 0x20,  # D
     "auto_interval_seconds": 0.3,
-    # Finger icon centre, in pixels of a 1440-high window, measured from the
-    # bottom centre of the window. Set with Ctrl+F12 while hovering it.
-    "auto_center": [4, -322],
     # Max grey difference to the template, as a fraction of the template's own
     # contrast: ~0 is a perfect match, ~1 is a flat patch of its average colour.
     "auto_match_ratio": 0.5,
@@ -80,15 +75,16 @@ SEARCH_MARGIN = 6
 # Consecutive missed icon checks before calling it a menu (ignores flashes).
 MISSES_FOR_MENU = 3
 HUD_CHECK_INTERVAL = 0.05
-# Half-size (px) of the square captured around the finger icon, and how far
-# it may shift and still match.
+# Finger icon above the D slot: always at the same spot, given in pixels of a
+# 1440-high window from its bottom centre, and the half-size of the square
+# compared there.
+AUTO_CENTER = (4, -322)
 AUTO_HALF = 20
-AUTO_MARGIN = 4
 
 # Offsets sampled around each extra menu spot; all must match.
 SAMPLE_OFFSETS = [(0, 0), (-4, 0), (4, 0), (0, -4), (0, 4)]
 
-VK_CONTROL, VK_ESCAPE, VK_F9, VK_F10, VK_F11, VK_F12 = 0x11, 0x1B, 0x78, 0x79, 0x7A, 0x7B
+VK_CONTROL, VK_ESCAPE, VK_F9, VK_F10, VK_F11 = 0x11, 0x1B, 0x78, 0x79, 0x7A
 # Keys a pause bind can use: everything except mouse buttons.
 BINDABLE_VKS = [vk for vk in range(0x08, 0xFF) if vk != VK_ESCAPE]
 # Keys whose name lookup needs the "extended" flag (arrows, Insert, ...).
@@ -267,23 +263,14 @@ def save_templates(source, boxes, offset=(0, 0)):
         source.crop((x0 - ox, y0 - oy, x1 - ox, y1 - oy)).save(template_path(i))
 
 
-AUTO_TEMPLATE = "auto.png"
-
-
 def half_size(img):
-    """Compared at half resolution: softer on anti-aliasing and 1px drift."""
+    """Compared at half resolution: softer on anti-aliasing."""
     return img.resize((img.width // 2, img.height // 2), Image.BOX)
 
 
 def load_auto_template():
     """The finger icon in grey (half size), with its mean deviation from its average."""
-    path = os.path.join(TEMPLATE_DIR, AUTO_TEMPLATE)
-    if not os.path.exists(path):
-        bundled = os.path.join(BUNDLE_DIR, "templates", AUTO_TEMPLATE)
-        if not os.path.exists(bundled):
-            return None
-        os.makedirs(TEMPLATE_DIR, exist_ok=True)
-        shutil.copy(bundled, path)
+    path = os.path.join(BUNDLE_DIR, "templates", "auto.png")
     img = half_size(Image.open(path).convert("L"))
     flat = Image.new("L", img.size, round(ImageStat.Stat(img).mean[0]))
     return img, max(ImageStat.Stat(ImageChops.difference(img, flat)).mean[0], 1.0)
@@ -408,29 +395,14 @@ class OptionsWindow:
         tk.Checkbutton(root, text="Auto chest/mechanics", variable=auto_var, font=FONT,
                        takefocus=0, bg=BG, fg=FG, selectcolor=PANEL, activebackground=BG,
                        activeforeground=FG, command=app.toggle_auto).grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(12, 2))
+            row=4, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
-        finger = tk.Frame(root, bg=PANEL, padx=10, pady=8)
-        finger.grid(row=5, column=0, columnspan=2, sticky="we", pady=(4, 0))
-        thumb = tk.Label(finger, bg=PANEL)
-        thumb.pack(side="left")
-        finger_text = tk.Label(finger, font=("Segoe UI", 9), bg=PANEL, fg=DIM,
-                               justify="left", anchor="w")
-        finger_text.pack(side="left", padx=(10, 0))
-
-        live = tk.Label(root, font=("Segoe UI", 9), bg=BG, fg=DIM, anchor="w")
-        live.grid(row=6, column=0, columnspan=2, sticky="we", pady=(6, 0))
-
-        clear = tk.Button(root, font=("Segoe UI", 8), takefocus=0, relief="flat",
-                          bg=PANEL, fg=DIM, activebackground=ACCENT, activeforeground=BG,
-                          command=app.clear_menu_points)
         tk.Label(root, text="Esc cancels a key change.", font=("Segoe UI", 8),
-                 bg=BG, fg=DIM).grid(row=7, column=0, sticky="w", pady=(8, 0))
+                 bg=BG, fg=DIM).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         names = {"pause": lambda: key_name(app.cfg["pause_vk"]),
                  "spam": lambda: scancode_name(app.cfg["key_scancode"]),
                  "auto": lambda: scancode_name(app.cfg["auto_scancode"])}
-        shown = {"template": False}
 
         def refresh():
             if self.root is not root:
@@ -443,32 +415,6 @@ class OptionsWindow:
                 b.config(text="Press a key..." if waiting else names[which](),
                          bg=ACCENT if waiting else PANEL, fg=BG if waiting else FG)
             auto_var.set(app.cfg["auto_enabled"])
-            if app.auto_score is None:
-                live.config(text=f"Finger icon: not checking (spam off)   "
-                                 f"{names['auto']()} presses: {app.auto_presses}", fg=DIM)
-            else:
-                live.config(text=f"Finger icon: {'SEEN' if app.auto_seen else 'not seen'} "
-                                 f"(score {app.auto_score:.2f})   "
-                                 f"{names['auto']()} presses: {app.auto_presses}",
-                            fg=ACCENT if app.auto_seen else DIM)
-            spots = len(app.cfg["menu_points"])
-            if spots:
-                clear.config(text=f"Clear extra menu spots ({spots})")
-                clear.grid(row=7, column=1, sticky="e", pady=(8, 0))
-            else:
-                clear.grid_remove()
-            if app.auto_template is not shown["template"]:
-                shown["template"] = app.auto_template
-                if app.auto_template:
-                    self.thumb = ImageTk.PhotoImage(
-                        app.auto_template[0].resize((40, 40)), master=root)
-                    thumb.config(image=self.thumb, width=40)
-                    finger_text.config(text="Finger icon captured.\n"
-                                            "Hover it + Ctrl+F12 to recapture.")
-                else:
-                    thumb.config(image="", width=0)
-                    finger_text.config(text="Finger icon not captured yet.\n"
-                                            "In game, hover it + Ctrl+F12.")
             root.after(100, refresh)
 
         with self.lock:
@@ -487,9 +433,6 @@ class Spammer:
         self.rebinding = None  # "pause", "spam" or "auto" while waiting for a key
         self.auto_template = load_auto_template()
         self.next_auto = 0.0
-        self.auto_score = None
-        self.auto_seen = False
-        self.auto_presses = 0
         self.options = OptionsWindow(self)
         self.running = True
         self.state = None
@@ -590,48 +533,17 @@ class Spammer:
         w, h = client_size(hwnd)
         s = h / self.cfg["hud_reference_size"][1]
         ox, oy = client_origin(hwnd)
-        dx, dy = self.cfg["auto_center"]
+        dx, dy = AUTO_CENTER
         cx, cy = round(ox + w / 2 + dx * s), round(oy + h + dy * s)
         return cx - AUTO_HALF, cy - AUTO_HALF, cx + AUTO_HALF, cy + AUTO_HALF
 
-    def capture_auto_icon(self):
-        hwnd = self.game_window()
-        if not hwnd:
-            return
-        cx, cy = cursor_pos()
-        w, h = client_size(hwnd)
-        s = h / self.cfg["hud_reference_size"][1]
-        ox, oy = client_origin(hwnd)
-        self.cfg["auto_center"] = [(cx - ox - w / 2) / s, (cy - oy - h) / s]
-        save_config(self.cfg)
-        os.makedirs(TEMPLATE_DIR, exist_ok=True)
-        ImageGrab.grab(bbox=self.auto_box(hwnd), all_screens=True).save(
-            os.path.join(TEMPLATE_DIR, AUTO_TEMPLATE))
-        self.auto_template = load_auto_template()
-        self.icon.update_menu()
-        winsound.Beep(1200, 120)
-        winsound.Beep(1500, 120)
-
-    def auto_icon_score(self, hwnd):
-        """Best difference to the finger icon, relative to its contrast (0 = exact)."""
-        if self.auto_template is None or not self.cfg["auto_center"]:
-            return None
-        x0, y0, x1, y1 = self.auto_box(hwnd)
-        m = AUTO_MARGIN
-        area = half_size(ImageGrab.grab(bbox=(x0 - m, y0 - m, x1 + m, y1 + m),
-                                        all_screens=True).convert("L"))
+    def auto_icon_visible(self, hwnd):
         tpl, contrast = self.auto_template
-        tw, th = tpl.size
-        return min(ImageStat.Stat(ImageChops.difference(
-                       area.crop((dx, dy, dx + tw, dy + th)), tpl)).mean[0]
-                   for dx in range(m + 1) for dy in range(m + 1)) / contrast
-
-    def log(self, text):
-        try:
-            with open(LOG_PATH, "a", encoding="utf-8") as f:
-                f.write(f"{time.strftime('%H:%M:%S')} {text}\n")
-        except OSError:
-            pass
+        area = half_size(ImageGrab.grab(bbox=self.auto_box(hwnd), all_screens=True).convert("L"))
+        if area.size != tpl.size:
+            area = area.resize(tpl.size, Image.BOX)  # window isn't 1440 high
+        diff = ImageStat.Stat(ImageChops.difference(area, tpl)).mean[0]
+        return diff <= contrast * self.cfg["auto_match_ratio"]
 
     def toggle_auto(self):
         self.cfg["auto_enabled"] = not self.cfg["auto_enabled"]
@@ -691,7 +603,7 @@ class Spammer:
         if self.rebinding:
             return self.poll_rebind(prev)
         pause_vk = self.cfg["pause_vk"]
-        now = {vk: key_down(vk) for vk in (pause_vk, VK_F9, VK_F10, VK_F11, VK_F12)}
+        now = {vk: key_down(vk) for vk in (pause_vk, VK_F9, VK_F10, VK_F11)}
         ctrl = key_down(VK_CONTROL)
         pressed = lambda vk: now[vk] and not prev.get(vk, True)
         if pressed(pause_vk):
@@ -702,8 +614,6 @@ class Spammer:
             self.clear_menu_points()
         if ctrl and pressed(VK_F11):
             self.recapture_hud()
-        if ctrl and pressed(VK_F12):
-            self.capture_auto_icon()
         return now
 
     def loop(self):
@@ -730,21 +640,10 @@ class Spammer:
             if (state in ("spamming", "menu") and self.cfg["auto_enabled"]
                     and now >= self.next_auto):
                 self.next_auto = now + 0.1
-                self.auto_score = self.auto_icon_score(hwnd)
-                seen = (self.auto_score is not None
-                        and self.auto_score <= self.cfg["auto_match_ratio"])
-                if seen != self.auto_seen:
-                    self.auto_seen = seen
-                    self.log(f"finger icon {'seen' if seen else 'gone'} "
-                             f"(score {self.auto_score:.2f})")
-                if seen:
+                if self.auto_icon_visible(hwnd):
                     # Held a bit longer than Q: interaction keys can miss a 15ms tap.
                     tap_key(self.cfg["auto_scancode"], hold=0.05)
-                    self.auto_presses += 1
-                    self.log(f"pressed {scancode_name(self.cfg['auto_scancode'])}")
                     self.next_auto = now + self.cfg["auto_interval_seconds"]
-            elif state not in ("spamming", "menu"):
-                self.auto_score, self.auto_seen = None, False
             time.sleep(0.01)
 
     def quit(self, icon, _item=None):
