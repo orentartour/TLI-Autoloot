@@ -5,7 +5,7 @@ Tray tool for Torchlight Infinite:
 - Spams Q (every 0.1s) while the game is focused and no menu is open. Menus are
   detected by the flame icon in the top-right HUD disappearing.
 - Auto chest/mechanics: presses D while the grey finger icon is on screen.
-- Options window (left-click the tray icon): rebind the pause, spam and auto
+- Options window (left-click the tray icon, or right-click > Options): rebind the pause, spam and auto
   keys, and turn auto chest/mechanics on or off.
 
 ## Hotkeys
@@ -24,5 +24,5 @@ Tray tool for Torchlight Infinite:
 ```
 
 The game runs elevated, so the app needs admin too. On first launch it asks
-once and registers a "TLI Q Spam" scheduled task to start elevated afterwards.
+once and registers a "TLI Autoloot" scheduled task to start elevated afterwards.
 Settings and templates live in `%APPDATA%\TLIQSpam`.

@@ -1,4 +1,4 @@
-"""Torchlight Infinite Q spammer.
+"""TLI Autoloot: Torchlight Infinite Q spammer with auto chest/mechanics.
 
 Presses Q every 0.1s while Torchlight Infinite is the active window and the
 flame icon in the top-right corner of the HUD is visible. When a menu opens
@@ -46,7 +46,8 @@ if getattr(sys, "frozen", False):
 else:
     DATA_DIR = HERE
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
-TASK_NAME = "TLI Q Spam"
+LOG_PATH = os.path.join(DATA_DIR, "autoloot.log")
+TASK_NAME = "TLI Autoloot"
 TEMPLATE_DIR = os.path.join(DATA_DIR, "templates")
 
 DEFAULT_CONFIG = {
@@ -142,9 +143,9 @@ def send_scancode(scancode, up):
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
-def tap_key(scancode):
+def tap_key(scancode, hold=0.015):
     send_scancode(scancode, up=False)
-    time.sleep(0.015)
+    time.sleep(hold)
     send_scancode(scancode, up=True)
 
 
@@ -379,7 +380,7 @@ class OptionsWindow:
     def build(self):
         app = self.app
         root = tk.Tk()
-        root.title("TLI Q Spam - Options")
+        root.title("TLI Autoloot - Options")
         root.configure(bg=BG, padx=16, pady=14)
         root.attributes("-topmost", True)
         root.resizable(False, False)
@@ -416,8 +417,14 @@ class OptionsWindow:
                                justify="left", anchor="w")
         finger_text.pack(side="left", padx=(10, 0))
 
+        live = tk.Label(root, font=("Segoe UI", 9), bg=BG, fg=DIM, anchor="w")
+        live.grid(row=6, column=0, columnspan=2, sticky="we", pady=(6, 0))
+
+        clear = tk.Button(root, font=("Segoe UI", 8), takefocus=0, relief="flat",
+                          bg=PANEL, fg=DIM, activebackground=ACCENT, activeforeground=BG,
+                          command=app.clear_menu_points)
         tk.Label(root, text="Esc cancels a key change.", font=("Segoe UI", 8),
-                 bg=BG, fg=DIM).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+                 bg=BG, fg=DIM).grid(row=7, column=0, sticky="w", pady=(8, 0))
 
         names = {"pause": lambda: key_name(app.cfg["pause_vk"]),
                  "spam": lambda: scancode_name(app.cfg["key_scancode"]),
@@ -435,6 +442,20 @@ class OptionsWindow:
                 b.config(text="Press a key..." if waiting else names[which](),
                          bg=ACCENT if waiting else PANEL, fg=BG if waiting else FG)
             auto_var.set(app.cfg["auto_enabled"])
+            if app.auto_score is None:
+                live.config(text=f"Finger icon: not checking (spam off)   "
+                                 f"{names['auto']()} presses: {app.auto_presses}", fg=DIM)
+            else:
+                live.config(text=f"Finger icon: {'SEEN' if app.auto_seen else 'not seen'} "
+                                 f"(score {app.auto_score:.2f})   "
+                                 f"{names['auto']()} presses: {app.auto_presses}",
+                            fg=ACCENT if app.auto_seen else DIM)
+            spots = len(app.cfg["menu_points"])
+            if spots:
+                clear.config(text=f"Clear extra menu spots ({spots})")
+                clear.grid(row=7, column=1, sticky="e", pady=(8, 0))
+            else:
+                clear.grid_remove()
             if app.auto_template is not shown["template"]:
                 shown["template"] = app.auto_template
                 if app.auto_template:
@@ -465,6 +486,9 @@ class Spammer:
         self.rebinding = None  # "pause", "spam" or "auto" while waiting for a key
         self.auto_template = load_auto_template()
         self.next_auto = 0.0
+        self.auto_score = None
+        self.auto_seen = False
+        self.auto_presses = 0
         self.options = OptionsWindow(self)
         self.running = True
         self.state = None
@@ -587,22 +611,26 @@ class Spammer:
         winsound.Beep(1200, 120)
         winsound.Beep(1500, 120)
 
-    def auto_icon_visible(self, hwnd):
+    def auto_icon_score(self, hwnd):
+        """Best difference to the finger icon, relative to its contrast (0 = exact)."""
         if self.auto_template is None or not self.cfg["auto_center"]:
-            return False
+            return None
         x0, y0, x1, y1 = self.auto_box(hwnd)
         m = AUTO_MARGIN
         area = half_size(ImageGrab.grab(bbox=(x0 - m, y0 - m, x1 + m, y1 + m),
                                         all_screens=True).convert("L"))
         tpl, contrast = self.auto_template
         tw, th = tpl.size
-        limit = contrast * self.cfg["auto_match_ratio"]
-        for dx in range(m + 1):
-            for dy in range(m + 1):
-                diff = ImageChops.difference(area.crop((dx, dy, dx + tw, dy + th)), tpl)
-                if ImageStat.Stat(diff).mean[0] <= limit:
-                    return True
-        return False
+        return min(ImageStat.Stat(ImageChops.difference(
+                       area.crop((dx, dy, dx + tw, dy + th)), tpl)).mean[0]
+                   for dx in range(m + 1) for dy in range(m + 1)) / contrast
+
+    def log(self, text):
+        try:
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%H:%M:%S')} {text}\n")
+        except OSError:
+            pass
 
     def toggle_auto(self):
         self.cfg["auto_enabled"] = not self.cfg["auto_enabled"]
@@ -617,7 +645,7 @@ class Spammer:
         if state != self.state and self.icon:
             self.state = state
             self.icon.icon = self.icons[state]
-            self.icon.title = f"TLI Q Spam - {STATE_LABELS[state]}"
+            self.icon.title = f"TLI Autoloot - {STATE_LABELS[state]}"
 
     def start_rebind(self, which):
         self.rebinding = which
@@ -691,9 +719,21 @@ class Spammer:
             if (state in ("spamming", "menu") and self.cfg["auto_enabled"]
                     and now >= self.next_auto):
                 self.next_auto = now + 0.1
-                if self.auto_icon_visible(hwnd):
-                    tap_key(self.cfg["auto_scancode"])
+                self.auto_score = self.auto_icon_score(hwnd)
+                seen = (self.auto_score is not None
+                        and self.auto_score <= self.cfg["auto_match_ratio"])
+                if seen != self.auto_seen:
+                    self.auto_seen = seen
+                    self.log(f"finger icon {'seen' if seen else 'gone'} "
+                             f"(score {self.auto_score:.2f})")
+                if seen:
+                    # Held a bit longer than Q: interaction keys can miss a 15ms tap.
+                    tap_key(self.cfg["auto_scancode"], hold=0.05)
+                    self.auto_presses += 1
+                    self.log(f"pressed {scancode_name(self.cfg['auto_scancode'])}")
                     self.next_auto = now + self.cfg["auto_interval_seconds"]
+            elif state not in ("spamming", "menu"):
+                self.auto_score, self.auto_seen = None, False
             time.sleep(0.01)
 
     def quit(self, icon, _item=None):
@@ -702,16 +742,12 @@ class Spammer:
 
     def run(self):
         menu = pystray.Menu(
-            pystray.MenuItem(lambda _: STATE_LABELS.get(self.state, ""), None, enabled=False),
-            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Options", lambda: self.options.show(), default=True),
             pystray.MenuItem(lambda _: f"Paused ({key_name(self.cfg['pause_vk'])})",
                              lambda: self.toggle_pause(), checked=lambda _: self.paused),
-            pystray.MenuItem("Options...", lambda: self.options.show(), default=True),
-            pystray.MenuItem(lambda _: f"Clear extra menu spots ({len(self.cfg['menu_points'])})",
-                             lambda: self.clear_menu_points()),
             pystray.MenuItem("Quit", self.quit),
         )
-        self.icon = pystray.Icon("tli_qspam", self.icons["unfocused"], "TLI Q Spam", menu)
+        self.icon = pystray.Icon("tli_autoloot", self.icons["unfocused"], "TLI Autoloot", menu)
 
         def setup(icon):
             icon.visible = True
