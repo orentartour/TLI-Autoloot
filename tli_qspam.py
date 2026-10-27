@@ -74,6 +74,7 @@ DEFAULT_CONFIG = {
     "auto_match_ratio": 0.5,
     "zero_scancode": 0x10,  # physical key that types A on AZERTY
     "zero_interval_seconds": 0.5,
+    "iris_mode": "=",  # IRIS 2 auto blink: "+" auto, "=" on left click, "-" off
 }
 
 # The icon's outline is light yellow; its orange glow stays below this.
@@ -108,6 +109,7 @@ CHARGE_MIN_LEAD = 0.3
 # Offsets sampled around each extra menu spot; all must match.
 SAMPLE_OFFSETS = [(0, 0), (-4, 0), (4, 0), (0, -4), (0, 4)]
 
+VK_LBUTTON = 0x01
 VK_CONTROL, VK_ESCAPE, VK_F9, VK_F10, VK_F11 = 0x11, 0x1B, 0x78, 0x79, 0x7A
 # Keys a pause bind can use: everything except mouse buttons.
 BINDABLE_VKS = [vk for vk in range(0x08, 0xFF) if vk != VK_ESCAPE]
@@ -475,6 +477,7 @@ class Spammer:
         self.auto_template = load_auto_template()
         self.next_auto = 0.0
         self.next_zero = 0.0
+        self.mouse_was_down = False
         self.charge_templates = load_charge_templates() if A_ON_ZERO else None
         self.options = OptionsWindow(self)
         self.running = True
@@ -725,13 +728,20 @@ class Spammer:
                     # Held a bit longer than Q: interaction keys can miss a 15ms tap.
                     tap_key(self.cfg["auto_scancode"], hold=0.05)
                     self.next_auto = now + self.cfg["auto_interval_seconds"]
-            # Spin-off: A while the slot-A skill is out of charges.
-            if (A_ON_ZERO and state == "spamming" and self.cfg["auto_enabled"]
-                    and now >= self.next_zero):
-                self.next_zero = now + 0.1
-                if self.charges_at_zero(hwnd):
+            # Spin-off, IRIS 2 auto blink, while the charge badge reads 0:
+            # "+" presses A by itself, "=" presses A on each left click, "-" is off.
+            iris = self.cfg["iris_mode"] if A_ON_ZERO else "-"
+            mouse_down = key_down(VK_LBUTTON)
+            clicked = mouse_down and not self.mouse_was_down
+            self.mouse_was_down = mouse_down
+            if state == "spamming" and self.cfg["auto_enabled"]:
+                if iris == "+" and now >= self.next_zero:
+                    self.next_zero = now + 0.1
+                    if self.charges_at_zero(hwnd):
+                        tap_key(self.cfg["zero_scancode"], hold=0.05)
+                        self.next_zero = now + self.cfg["zero_interval_seconds"]
+                elif iris == "=" and clicked and self.charges_at_zero(hwnd):
                     tap_key(self.cfg["zero_scancode"], hold=0.05)
-                    self.next_zero = now + self.cfg["zero_interval_seconds"]
             time.sleep(0.01)
 
     def quit(self, icon, _item=None):
