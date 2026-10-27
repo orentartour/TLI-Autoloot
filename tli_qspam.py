@@ -74,7 +74,7 @@ DEFAULT_CONFIG = {
     "auto_match_ratio": 0.5,
     "zero_scancode": 0x10,  # physical key that types A on AZERTY
     "zero_interval_seconds": 0.5,
-    "iris_mode": "=",  # IRIS 2 auto blink: "+" auto, "=" on left click, "-" off
+    "iris_mode": "=",  # IRIS 2 auto blink: "+" auto, "=" on right click, "-" off
 }
 
 # The icon's outline is light yellow; its orange glow stays below this.
@@ -109,7 +109,7 @@ CHARGE_MIN_LEAD = 0.3
 # Offsets sampled around each extra menu spot; all must match.
 SAMPLE_OFFSETS = [(0, 0), (-4, 0), (4, 0), (0, -4), (0, 4)]
 
-VK_LBUTTON = 0x01
+VK_RBUTTON = 0x02
 VK_CONTROL, VK_ESCAPE, VK_F9, VK_F10, VK_F11 = 0x11, 0x1B, 0x78, 0x79, 0x7A
 # Keys a pause bind can use: everything except mouse buttons.
 BINDABLE_VKS = [vk for vk in range(0x08, 0xFF) if vk != VK_ESCAPE]
@@ -729,9 +729,9 @@ class Spammer:
                     tap_key(self.cfg["auto_scancode"], hold=0.05)
                     self.next_auto = now + self.cfg["auto_interval_seconds"]
             # Spin-off, IRIS 2 auto blink, while the charge badge reads 0:
-            # "+" presses A by itself, "=" presses A on each left click, "-" is off.
+            # "+" presses A by itself, "=" presses A on each right click, "-" is off.
             iris = self.cfg["iris_mode"] if A_ON_ZERO else "-"
-            mouse_down = key_down(VK_LBUTTON)
+            mouse_down = key_down(VK_RBUTTON)
             clicked = mouse_down and not self.mouse_was_down
             self.mouse_was_down = mouse_down
             if state == "spamming" and self.cfg["auto_enabled"]:
