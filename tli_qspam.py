@@ -17,6 +17,9 @@ Auto chest/mechanics: while spamming is on (not paused, game focused) and the
 grey finger icon above the D slot is showing, presses D. Keys and the on/off
 switch are in the Options window (left-click the tray icon).
 
+Spin-off "TLI Autoloot A" (tli_autoloot_a.py): also presses A while the skill
+in slot A shows 0 charges on its yellow badge.
+
 Tray icon colour: green = spamming, orange = menu open,
 grey = game not focused, red = paused.
 """
@@ -45,7 +48,10 @@ if getattr(sys, "frozen", False):
 else:
     DATA_DIR = HERE
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
+APP_NAME = "TLI Autoloot"
 TASK_NAME = "TLI Autoloot"
+# Set by the spin-off entry point (tli_autoloot_a.py).
+A_ON_ZERO = False
 TEMPLATE_DIR = os.path.join(DATA_DIR, "templates")
 
 DEFAULT_CONFIG = {
@@ -66,6 +72,8 @@ DEFAULT_CONFIG = {
     # Max grey difference to the template, as a fraction of the template's own
     # contrast: ~0 is a perfect match, ~1 is a flat patch of its average colour.
     "auto_match_ratio": 0.5,
+    "zero_scancode": 0x10,  # physical key that types A on AZERTY
+    "zero_interval_seconds": 0.5,
 }
 
 # The icon's outline is light yellow; its orange glow stays below this.
@@ -85,6 +93,12 @@ AUTO_HALF = 20
 # left, and the share of it that must be slate to skip the press.
 PANEL_REGION = (60, 170, 420, 560)
 PANEL_MIN_SHARE = 0.4
+# Spin-off: the charge digit on the yellow badge under the skill in slot A,
+# from the bottom centre of a 1440-high window. Read as 0 when it is closest
+# to the "0" template, close enough, and clearly closer than to 1 or 2.
+CHARGE_BOX = (-152, -140, -138, -124)
+CHARGE_MAX_DIFF = 12
+CHARGE_MIN_GAP = 8
 
 # Offsets sampled around each extra menu spot; all must match.
 SAMPLE_OFFSETS = [(0, 0), (-4, 0), (4, 0), (0, -4), (0, 4)]
@@ -281,6 +295,12 @@ def load_auto_template():
     return img, max(ImageStat.Stat(ImageChops.difference(img, flat)).mean[0], 1.0)
 
 
+def load_charge_templates():
+    return {d: half_size(Image.open(os.path.join(BUNDLE_DIR, "templates", f"charge_{d}.png"))
+                         .convert("L"))
+            for d in "012"}
+
+
 def load_templates(count):
     bundled = os.path.join(BUNDLE_DIR, "templates")
     if not os.path.isdir(TEMPLATE_DIR) and os.path.isdir(bundled):
@@ -341,6 +361,7 @@ def make_icon(color, size=64):
 BG, PANEL, FG, DIM, ACCENT = "#1d1e23", "#2b2d34", "#ececee", "#9b9ca4", "#e8792b"
 FONT = ("Segoe UI", 10)
 BINDS = [("pause", "Pause / resume"), ("spam", "Spam key"), ("auto", "Auto chest/mechanics key")]
+SEND_KEYS = {"spam": "key_scancode", "auto": "auto_scancode", "zero": "zero_scancode"}
 
 
 def hex_color(rgb):
@@ -373,7 +394,7 @@ class OptionsWindow:
     def build(self):
         app = self.app
         root = tk.Tk()
-        root.title("TLI Autoloot - Options")
+        root.title(f"{APP_NAME} - Options")
         root.configure(bg=BG, padx=16, pady=14)
         root.attributes("-topmost", True)
         root.resizable(False, False)
@@ -387,7 +408,8 @@ class OptionsWindow:
 
         # Buttons never take focus, so the key pressed to bind can't click them.
         buttons = {}
-        for row, (which, label) in enumerate(BINDS, start=1):
+        binds = BINDS + ([("zero", "Key at 0 charges")] if A_ON_ZERO else [])
+        for row, (which, label) in enumerate(binds, start=1):
             tk.Label(root, text=label, font=FONT, bg=BG, fg=FG, anchor="w").grid(
                 row=row, column=0, sticky="w", pady=3)
             b = tk.Button(root, font=FONT, width=16, takefocus=0, relief="flat",
@@ -400,14 +422,15 @@ class OptionsWindow:
         tk.Checkbutton(root, text="Auto chest/mechanics", variable=auto_var, font=FONT,
                        takefocus=0, bg=BG, fg=FG, selectcolor=PANEL, activebackground=BG,
                        activeforeground=FG, command=app.toggle_auto).grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(12, 0))
+            row=len(binds) + 1, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
         tk.Label(root, text="Esc cancels a key change.", font=("Segoe UI", 8),
-                 bg=BG, fg=DIM).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+                 bg=BG, fg=DIM).grid(row=len(binds) + 2, column=0, columnspan=2,
+                                     sticky="w", pady=(8, 0))
 
-        names = {"pause": lambda: key_name(app.cfg["pause_vk"]),
-                 "spam": lambda: scancode_name(app.cfg["key_scancode"]),
-                 "auto": lambda: scancode_name(app.cfg["auto_scancode"])}
+        names = {"pause": lambda: key_name(app.cfg["pause_vk"])}
+        names.update({which: lambda k=key: scancode_name(app.cfg[k])
+                      for which, key in SEND_KEYS.items()})
 
         def refresh():
             if self.root is not root:
@@ -438,6 +461,8 @@ class Spammer:
         self.rebinding = None  # "pause", "spam" or "auto" while waiting for a key
         self.auto_template = load_auto_template()
         self.next_auto = 0.0
+        self.next_zero = 0.0
+        self.charge_templates = load_charge_templates() if A_ON_ZERO else None
         self.options = OptionsWindow(self)
         self.running = True
         self.state = None
@@ -550,6 +575,22 @@ class Spammer:
         diff = ImageStat.Stat(ImageChops.difference(area, tpl)).mean[0]
         return diff <= contrast * self.cfg["auto_match_ratio"]
 
+    def charges_at_zero(self, hwnd):
+        w, h = client_size(hwnd)
+        s = h / self.cfg["hud_reference_size"][1]
+        ox, oy = client_origin(hwnd)
+        x0, y0, x1, y1 = CHARGE_BOX
+        cx, by = ox + w / 2, oy + h
+        area = half_size(ImageGrab.grab(
+            bbox=(round(cx + x0 * s), round(by + y0 * s), round(cx + x1 * s), round(by + y1 * s)),
+            all_screens=True).convert("L"))
+        diffs = {}
+        for digit, tpl in self.charge_templates.items():
+            live = area if area.size == tpl.size else area.resize(tpl.size, Image.BOX)
+            diffs[digit] = ImageStat.Stat(ImageChops.difference(live, tpl)).mean[0]
+        zero = diffs["0"]
+        return zero <= CHARGE_MAX_DIFF and min(diffs["1"], diffs["2"]) - zero >= CHARGE_MIN_GAP
+
     def dps_panel_open(self, hwnd):
         s = client_size(hwnd)[1] / self.cfg["hud_reference_size"][1]
         ox, oy = client_origin(hwnd)
@@ -574,7 +615,7 @@ class Spammer:
         if state != self.state and self.icon:
             self.state = state
             self.icon.icon = self.icons[state]
-            self.icon.title = f"TLI Autoloot - {STATE_LABELS[state]}"
+            self.icon.title = f"{APP_NAME} - {STATE_LABELS[state]}"
 
     def start_rebind(self, which):
         self.rebinding = which
@@ -606,8 +647,7 @@ class Spammer:
                 self.cfg["pause_vk"] = vk
             else:
                 # Sent keys go out as scancodes, so the layout (AZERTY) is respected.
-                key = "key_scancode" if self.rebinding == "spam" else "auto_scancode"
-                self.cfg[key] = user32.MapVirtualKeyW(vk, 0)
+                self.cfg[SEND_KEYS[self.rebinding]] = user32.MapVirtualKeyW(vk, 0)
             save_config(self.cfg)
             self.rebinding = None
             winsound.Beep(1200, 120)
@@ -660,6 +700,13 @@ class Spammer:
                     # Held a bit longer than Q: interaction keys can miss a 15ms tap.
                     tap_key(self.cfg["auto_scancode"], hold=0.05)
                     self.next_auto = now + self.cfg["auto_interval_seconds"]
+            # Spin-off: A while the slot-A skill is out of charges.
+            if (A_ON_ZERO and state == "spamming" and self.cfg["auto_enabled"]
+                    and now >= self.next_zero):
+                self.next_zero = now + 0.1
+                if self.charges_at_zero(hwnd):
+                    tap_key(self.cfg["zero_scancode"], hold=0.05)
+                    self.next_zero = now + self.cfg["zero_interval_seconds"]
             time.sleep(0.01)
 
     def quit(self, icon, _item=None):
@@ -673,7 +720,7 @@ class Spammer:
                              lambda: self.toggle_pause(), checked=lambda _: self.paused),
             pystray.MenuItem("Quit", self.quit),
         )
-        self.icon = pystray.Icon("tli_autoloot", self.icons["unfocused"], "TLI Autoloot", menu)
+        self.icon = pystray.Icon("tli_autoloot", self.icons["unfocused"], APP_NAME, menu)
 
         def setup(icon):
             icon.visible = True
