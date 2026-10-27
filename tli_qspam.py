@@ -66,7 +66,7 @@ DEFAULT_CONFIG = {
     "auto_interval_seconds": 0.3,
     # Finger icon centre, in pixels of a 1440-high window, measured from the
     # bottom centre of the window. Set with Ctrl+F12 while hovering it.
-    "auto_center": None,
+    "auto_center": [4, -322],
     # Max grey difference to the template, as a fraction of the template's own
     # contrast: ~0 is a perfect match, ~1 is a flat patch of its average colour.
     "auto_match_ratio": 0.5,
@@ -268,12 +268,21 @@ def save_templates(source, boxes, offset=(0, 0)):
 AUTO_TEMPLATE = "auto.png"
 
 
+def half_size(img):
+    """Compared at half resolution: softer on anti-aliasing and 1px drift."""
+    return img.resize((img.width // 2, img.height // 2), Image.BOX)
+
+
 def load_auto_template():
-    """The finger icon in grey, with its mean deviation from its average."""
-    try:
-        img = Image.open(os.path.join(TEMPLATE_DIR, AUTO_TEMPLATE)).convert("L")
-    except FileNotFoundError:
-        return None
+    """The finger icon in grey (half size), with its mean deviation from its average."""
+    path = os.path.join(TEMPLATE_DIR, AUTO_TEMPLATE)
+    if not os.path.exists(path):
+        bundled = os.path.join(BUNDLE_DIR, "templates", AUTO_TEMPLATE)
+        if not os.path.exists(bundled):
+            return None
+        os.makedirs(TEMPLATE_DIR, exist_ok=True)
+        shutil.copy(bundled, path)
+    img = half_size(Image.open(path).convert("L"))
     flat = Image.new("L", img.size, round(ImageStat.Stat(img).mean[0]))
     return img, max(ImageStat.Stat(ImageChops.difference(img, flat)).mean[0], 1.0)
 
@@ -583,13 +592,13 @@ class Spammer:
             return False
         x0, y0, x1, y1 = self.auto_box(hwnd)
         m = AUTO_MARGIN
-        area = ImageGrab.grab(bbox=(x0 - m, y0 - m, x1 + m, y1 + m),
-                              all_screens=True).convert("L")
+        area = half_size(ImageGrab.grab(bbox=(x0 - m, y0 - m, x1 + m, y1 + m),
+                                        all_screens=True).convert("L"))
         tpl, contrast = self.auto_template
         tw, th = tpl.size
         limit = contrast * self.cfg["auto_match_ratio"]
-        for dx in range(0, 2 * m + 1, 2):
-            for dy in range(0, 2 * m + 1, 2):
+        for dx in range(m + 1):
+            for dy in range(m + 1):
                 diff = ImageChops.difference(area.crop((dx, dy, dx + tw, dy + th)), tpl)
                 if ImageStat.Stat(diff).mean[0] <= limit:
                     return True
