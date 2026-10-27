@@ -32,6 +32,8 @@ and sets up a scheduled task, so later launches don't show a prompt.
 
 ## Options
 
+<img src="docs/options.png" alt="The Options panel of TLI Autoloot A" width="280" align="right">
+
 Left-click the tray icon to open the Options panel. From there you can:
 
 - rebind Pause / resume (F8 by default), Spam, Loot and Blink: click a key,
