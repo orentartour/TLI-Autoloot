@@ -93,6 +93,7 @@ VK_CONTROL, VK_ESCAPE, VK_F9, VK_F10, VK_F11, VK_F12 = 0x11, 0x1B, 0x78, 0x79, 0
 BINDABLE_VKS = [vk for vk in range(0x08, 0xFF) if vk != VK_ESCAPE]
 # Keys whose name lookup needs the "extended" flag (arrows, Insert, ...).
 EXTENDED_VKS = set(range(0x21, 0x2F)) | {0x5B, 0x5C, 0x5D, 0x6F, 0x90}
+WIN_VKS = {0x5B, 0x5C}
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32")
@@ -653,10 +654,20 @@ class Spammer:
         winsound.Beep(1000, 80)
         winsound.Beep(1000, 80)
 
+    def can_bind(self, vk):
+        """Never the Windows keys (Win+Shift+S etc. while waiting). Sent keys
+        also need a plain scancode: SendInput here can't send extended ones."""
+        if vk in WIN_VKS:
+            return False
+        if self.rebinding == "pause" or vk == VK_ESCAPE:
+            return True
+        return vk not in EXTENDED_VKS and user32.MapVirtualKeyW(vk, 0) != 0
+
     def poll_rebind(self, prev):
         """Waits for the next key press and binds it (Esc cancels)."""
         now = {vk: key_down(vk) for vk in BINDABLE_VKS + [VK_ESCAPE]}
-        pressed = [vk for vk in now if now[vk] and not prev.get(vk, True)]
+        pressed = [vk for vk in now if now[vk] and not prev.get(vk, True)
+                   and self.can_bind(vk)]
         if VK_ESCAPE in pressed:
             self.rebinding = None
             self.icon.update_menu()
