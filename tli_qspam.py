@@ -372,11 +372,22 @@ def make_icon(color, size=64):
 
 
 # --- Options window ------------------------------------------------------------
+# Styled after Torchlight Infinite's own panels: dark slate, hairline borders,
+# warm gold headings, bordered key chips and a round close button.
 
-BG, PANEL, FG, DIM, ACCENT = "#1d1e23", "#2b2d34", "#ececee", "#9b9ca4", "#e8792b"
-FONT = ("Segoe UI", 10)
-BINDS = [("pause", "Pause / resume"), ("spam", "Spam key"), ("auto", "Auto chest/mechanics key")]
+BG = "#161c22"       # panel
+ROW = "#1d252d"      # row surface
+LINE = "#33404b"     # hairlines and chip borders
+FG = "#e9e4d8"       # warm off-white text
+DIM = "#8a949c"
+GOLD = "#d9a441"
+FONT = ("Segoe UI", 9)
+FONT_KEY = ("Segoe UI Semibold", 9)
+FONT_HEAD = ("Segoe UI Semibold", 8)
+WIDTH = 280
+BINDS = [("pause", "Pause / resume"), ("spam", "Spam"), ("auto", "Loot")]
 SEND_KEYS = {"spam": "key_scancode", "auto": "auto_scancode", "zero": "zero_scancode"}
+IRIS_MODES = [("+", "Auto"), ("=", "Right click"), ("-", "Off")]
 
 
 def hex_color(rgb):
@@ -384,8 +395,9 @@ def hex_color(rgb):
 
 
 class OptionsWindow:
-    """Small always-on-top window for the keys and the auto chest switch.
-    Tk lives in its own thread and re-reads the spammer's state every 100ms."""
+    """Small borderless always-on-top panel: keys, the auto loot switch and,
+    in the spin-off, the IRIS 2 auto blink mode. Tk lives in its own thread
+    and re-reads the spammer's state every 100ms."""
 
     def __init__(self, app):
         self.app = app
@@ -409,56 +421,164 @@ class OptionsWindow:
     def build(self):
         app = self.app
         root = tk.Tk()
-        root.title(f"{APP_NAME} - Options")
-        root.configure(bg=BG, padx=16, pady=14)
+        root.overrideredirect(True)  # no Windows title bar; the header drags
         root.attributes("-topmost", True)
-        root.resizable(False, False)
+        root.configure(bg=LINE)  # 1px border around the panel
+        panel = tk.Frame(root, bg=BG, padx=12, pady=10)
+        panel.pack(fill="both", expand=True, padx=1, pady=1)
+        panel.columnconfigure(0, weight=1)
+
+        # Header: crystal, title, status, close.
+        head = tk.Frame(panel, bg=BG)
+        head.grid(row=0, column=0, sticky="we")
         self.logo = ImageTk.PhotoImage(
-            Image.open(os.path.join(BUNDLE_DIR, "fe.png")).resize((32, 32)), master=root)
-        root.iconphoto(True, self.logo)
-        root.protocol("WM_DELETE_WINDOW", self.close)
+            Image.open(os.path.join(BUNDLE_DIR, "fe.png")).resize((22, 22)), master=root)
+        tk.Label(head, image=self.logo, bg=BG).pack(side="left")
+        titles = tk.Frame(head, bg=BG)
+        titles.pack(side="left", padx=(8, 0))
+        tk.Label(titles, text=APP_NAME.upper(), font=("Segoe UI Semibold", 10),
+                 bg=BG, fg=GOLD).pack(anchor="w")
+        status = tk.Label(titles, font=("Segoe UI", 8), bg=BG, fg=DIM)
+        status.pack(anchor="w")
+        close = tk.Canvas(head, width=22, height=22, bg=BG, highlightthickness=0)
+        close.pack(side="right")
 
-        status = tk.Label(root, font=("Segoe UI", 11, "bold"), bg=BG, fg=FG, anchor="w")
-        status.grid(row=0, column=0, columnspan=2, sticky="we", pady=(0, 10))
+        def draw_close(hover):
+            close.delete("all")
+            colour = FG if hover else DIM
+            close.create_oval(2, 2, 20, 20, outline=colour, width=1)
+            close.create_line(8, 8, 14, 14, fill=colour, width=2)
+            close.create_line(14, 8, 8, 14, fill=colour, width=2)
+        draw_close(False)
+        close.bind("<Enter>", lambda _: draw_close(True))
+        close.bind("<Leave>", lambda _: draw_close(False))
+        close.bind("<Button-1>", lambda _: self.close())
 
-        # Buttons never take focus, so the key pressed to bind can't click them.
-        buttons = {}
-        binds = BINDS + ([("zero", "Key at 0 charges")] if A_ON_ZERO else [])
-        for row, (which, label) in enumerate(binds, start=1):
-            tk.Label(root, text=label, font=FONT, bg=BG, fg=FG, anchor="w").grid(
-                row=row, column=0, sticky="w", pady=3)
-            b = tk.Button(root, font=FONT, width=16, takefocus=0, relief="flat",
-                          bg=PANEL, fg=FG, activebackground=ACCENT, activeforeground=BG,
-                          command=lambda w=which: app.start_rebind(w))
-            b.grid(row=row, column=1, sticky="e", padx=(16, 0), pady=3)
-            buttons[which] = b
+        drag = {}
+        def start_drag(e):
+            drag["x"], drag["y"] = e.x_root - root.winfo_x(), e.y_root - root.winfo_y()
+        def do_drag(e):
+            root.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
+        for w in (head, titles, *titles.winfo_children(), *head.winfo_children()[:1]):
+            w.bind("<Button-1>", start_drag)
+            w.bind("<B1-Motion>", do_drag)
 
-        auto_var = tk.BooleanVar(master=root)
-        tk.Checkbutton(root, text="Auto chest/mechanics", variable=auto_var, font=FONT,
-                       takefocus=0, bg=BG, fg=FG, selectcolor=PANEL, activebackground=BG,
-                       activeforeground=FG, command=app.toggle_auto).grid(
-            row=len(binds) + 1, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        row_no = [1]
+        def section(text):
+            tk.Label(panel, text=text, font=FONT_HEAD, bg=BG, fg=GOLD, anchor="w").grid(
+                row=row_no[0], column=0, sticky="we", pady=(10, 3))
+            tk.Frame(panel, bg=LINE, height=1).grid(row=row_no[0], column=0, sticky="sew")
+            row_no[0] += 1
 
-        tk.Label(root, text="Esc cancels a key change.", font=("Segoe UI", 8),
-                 bg=BG, fg=DIM).grid(row=len(binds) + 2, column=0, columnspan=2,
-                                     sticky="w", pady=(8, 0))
+        def row(label):
+            f = tk.Frame(panel, bg=ROW, padx=8, pady=4)
+            f.grid(row=row_no[0], column=0, sticky="we", pady=1)
+            tk.Label(f, text=label, font=FONT, bg=ROW, fg=FG, anchor="w").pack(side="left")
+            row_no[0] += 1
+            return f
+
+        # Keys: bordered chips like the game's key labels; click, then press a key.
+        section("KEYS")
+        chips = {}
+        binds = BINDS + ([("zero", "Blink")] if A_ON_ZERO else [])
+        for which, label in binds:
+            chip = tk.Label(row(label), font=FONT_KEY, width=7, bg=BG, fg=FG,
+                            highlightthickness=1, highlightbackground=LINE, cursor="hand2")
+            chip.pack(side="right")
+            chip.bind("<Button-1>", lambda _, w=which: app.start_rebind(w))
+            chips[which] = chip
+
+        # Auto loot switch.
+        section("AUTO LOOT")
+        switch = tk.Canvas(row("Chests & mechanics"), width=34, height=18, bg=ROW,
+                           highlightthickness=0, cursor="hand2")
+        switch.pack(side="right")
+        switch.bind("<Button-1>", lambda _: app.toggle_auto())
+
+        def draw_switch(on):
+            switch.delete("all")
+            track = GOLD if on else LINE
+            switch.create_oval(1, 1, 17, 17, fill=track, outline=track)
+            switch.create_oval(17, 1, 33, 17, fill=track, outline=track)
+            switch.create_rectangle(9, 1, 25, 17, fill=track, outline=track)
+            x = 18 if on else 2
+            switch.create_oval(x, 2, x + 14, 16, fill=FG if on else DIM, outline="")
+
+        # IRIS 2 auto blink: three-stop slider + > = > -.
+        slider = None
+        if A_ON_ZERO:
+            section("IRIS 2 AUTO BLINK")
+            box = tk.Frame(panel, bg=ROW, padx=8, pady=6)
+            box.grid(row=row_no[0], column=0, sticky="we", pady=1)
+            row_no[0] += 1
+            sw = WIDTH - 2 * 12 - 2 * 8
+            slider = tk.Canvas(box, width=sw, height=54, bg=ROW, highlightthickness=0,
+                               cursor="hand2")
+            slider.pack()
+            stops = [round(30 + i * (sw - 60) / 2) for i in range(3)]
+
+            def pick(e):
+                i = min(range(3), key=lambda k: abs(stops[k] - e.x))
+                app.set_iris(IRIS_MODES[i][0])
+            slider.bind("<Button-1>", pick)
+            slider.bind("<B1-Motion>", pick)
+
+        def draw_slider(mode):
+            slider.delete("all")
+            sel = [m for m, _ in IRIS_MODES].index(mode)
+            y = 25
+            slider.create_line(stops[0], y, stops[2], y, fill=LINE, width=3)
+            slider.create_line(stops[0], y, stops[sel], y, fill=GOLD, width=3)
+            for i, (m, name) in enumerate(IRIS_MODES):
+                on = i == sel
+                slider.create_text(stops[i], 8, text=m, font=("Segoe UI Semibold", 12),
+                                   fill=GOLD if on else DIM)
+                slider.create_text(stops[i], 45, text=name, font=("Segoe UI", 8),
+                                   fill=FG if on else DIM)
+                r = 7 if on else 4
+                slider.create_oval(stops[i] - r, y - r, stops[i] + r, y + r,
+                                   fill=FG if on else (GOLD if i < sel else LINE), outline="")
 
         names = {"pause": lambda: key_name(app.cfg["pause_vk"])}
         names.update({which: lambda k=key: scancode_name(app.cfg[k])
                       for which, key in SEND_KEYS.items()})
+        drawn = {}
 
         def refresh():
             if self.root is not root:
                 return
             state = app.state or "unfocused"
-            status.config(text=f"\u25cf  {STATE_LABELS[state]}",
-                          fg=hex_color(STATE_COLORS[state]))
-            for which, b in buttons.items():
+            if app.rebinding:
+                status.config(text="Press a key  ·  Esc cancels", fg=GOLD)
+            else:
+                status.config(text=f"● {STATE_LABELS[state]}",
+                              fg=hex_color(STATE_COLORS[state]))
+            for which, chip in chips.items():
                 waiting = app.rebinding == which
-                b.config(text="Press a key..." if waiting else names[which](),
-                         bg=ACCENT if waiting else PANEL, fg=BG if waiting else FG)
-            auto_var.set(app.cfg["auto_enabled"])
+                chip.config(text="..." if waiting else names[which](),
+                            highlightbackground=GOLD if waiting else LINE,
+                            fg=GOLD if waiting else FG)
+            # Canvases are redrawn only when their value changes.
+            if drawn.get("auto") != app.cfg["auto_enabled"]:
+                drawn["auto"] = app.cfg["auto_enabled"]
+                draw_switch(drawn["auto"])
+            if slider and drawn.get("iris") != app.cfg["iris_mode"]:
+                drawn["iris"] = app.cfg["iris_mode"]
+                draw_slider(drawn["iris"])
             root.after(100, refresh)
+
+        # Bottom-right of the work area, above the tray.
+        root.update_idletasks()
+        work = wt.RECT()
+        user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(work), 0)  # SPI_GETWORKAREA
+        root.geometry(f"{WIDTH}x{root.winfo_reqheight()}"
+                      f"+{work.right - WIDTH - 16}+{work.bottom - root.winfo_reqheight() - 16}")
+        try:  # Windows 11 rounded corners
+            hwnd = user32.GetParent(root.winfo_id())
+            pref = ctypes.c_int(2)  # DWMWCP_ROUND
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
+        except Exception:
+            pass
 
         with self.lock:
             self.root = root
@@ -634,6 +754,11 @@ class Spammer:
         self.cfg["auto_enabled"] = not self.cfg["auto_enabled"]
         save_config(self.cfg)
         winsound.Beep(900 if self.cfg["auto_enabled"] else 500, 100)
+
+    def set_iris(self, mode):
+        if mode != self.cfg["iris_mode"]:
+            self.cfg["iris_mode"] = mode
+            save_config(self.cfg)
 
     def toggle_pause(self):
         self.paused = not self.paused
