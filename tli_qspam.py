@@ -80,6 +80,11 @@ HUD_CHECK_INTERVAL = 0.05
 # compared there.
 AUTO_CENTER = (4, -322)
 AUTO_HALF = 20
+# The DPS meter panel (top left, dark slate) also shows the finger icon but
+# must not get D. Area checked, in pixels of a 1440-high window from the top
+# left, and the share of it that must be slate to skip the press.
+PANEL_REGION = (60, 170, 420, 560)
+PANEL_MIN_SHARE = 0.4
 
 # Offsets sampled around each extra menu spot; all must match.
 SAMPLE_OFFSETS = [(0, 0), (-4, 0), (4, 0), (0, -4), (0, 4)]
@@ -545,6 +550,17 @@ class Spammer:
         diff = ImageStat.Stat(ImageChops.difference(area, tpl)).mean[0]
         return diff <= contrast * self.cfg["auto_match_ratio"]
 
+    def dps_panel_open(self, hwnd):
+        s = client_size(hwnd)[1] / self.cfg["hud_reference_size"][1]
+        ox, oy = client_origin(hwnd)
+        x0, y0, x1, y1 = (round(v * s) for v in PANEL_REGION)
+        shot = ImageGrab.grab(bbox=(ox + x0, oy + y0, ox + x1, oy + y1),
+                              all_screens=True).convert("RGB").reduce(4)
+        # Dark, cool grey: blue clearly above red, neither black nor bright.
+        slate = sum(1 for r, g, b in shot.getdata()
+                    if 30 <= max(r, g, b) <= 100 and b - r >= 12 and b >= g - 4)
+        return slate >= PANEL_MIN_SHARE * shot.width * shot.height
+
     def toggle_auto(self):
         self.cfg["auto_enabled"] = not self.cfg["auto_enabled"]
         save_config(self.cfg)
@@ -640,7 +656,7 @@ class Spammer:
             if (state in ("spamming", "menu") and self.cfg["auto_enabled"]
                     and now >= self.next_auto):
                 self.next_auto = now + 0.1
-                if self.auto_icon_visible(hwnd):
+                if self.auto_icon_visible(hwnd) and not self.dps_panel_open(hwnd):
                     # Held a bit longer than Q: interaction keys can miss a 15ms tap.
                     tap_key(self.cfg["auto_scancode"], hold=0.05)
                     self.next_auto = now + self.cfg["auto_interval_seconds"]
