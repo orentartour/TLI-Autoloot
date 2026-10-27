@@ -93,12 +93,17 @@ AUTO_HALF = 20
 # left, and the share of it that must be slate to skip the press.
 PANEL_REGION = (60, 170, 420, 560)
 PANEL_MIN_SHARE = 0.4
-# Spin-off: the charge digit on the yellow badge under the skill in slot A,
-# from the bottom centre of a 1440-high window. Read as 0 when it is closest
-# to the "0" template, close enough, and clearly closer than to 1 or 2.
-CHARGE_BOX = (-152, -140, -138, -124)
-CHARGE_MAX_DIFF = 12
-CHARGE_MIN_GAP = 8
+# Spin-off: the charge digit on the yellow badge of a skill. Left edges of the
+# 14x16 digit box in each skill slot (mouse, A, Z, E, R, F) and its top, from
+# the bottom centre of a 1440-high window: the badge follows the skill.
+CHARGE_SLOTS_X = [-246 + 94 * k for k in range(6)]
+CHARGE_Y = -140
+CHARGE_SIZE = (14, 16)
+# Digits are compared by shape (normalised correlation), which holds up when
+# the cooldown overlay darkens the icon. 0 needs this score, and this lead
+# over 1 and 2.
+CHARGE_MIN_SCORE = 0.6
+CHARGE_MIN_LEAD = 0.3
 
 # Offsets sampled around each extra menu spot; all must match.
 SAMPLE_OFFSETS = [(0, 0), (-4, 0), (4, 0), (0, -4), (0, 4)]
@@ -295,9 +300,17 @@ def load_auto_template():
     return img, max(ImageStat.Stat(ImageChops.difference(img, flat)).mean[0], 1.0)
 
 
+def normalised(img):
+    """Grey pixels scaled to mean 0 and spread 1: only the shape is left."""
+    px = list(img.convert("L").getdata())
+    mean = sum(px) / len(px)
+    spread = (sum((p - mean) ** 2 for p in px) / len(px)) ** 0.5 or 1.0
+    return [(p - mean) / spread for p in px]
+
+
 def load_charge_templates():
-    return {d: half_size(Image.open(os.path.join(BUNDLE_DIR, "templates", f"charge_{d}.png"))
-                         .convert("L"))
+    return {d: normalised(half_size(Image.open(
+                os.path.join(BUNDLE_DIR, "templates", f"charge_{d}.png"))))
             for d in "012"}
 
 
@@ -576,20 +589,32 @@ class Spammer:
         return diff <= contrast * self.cfg["auto_match_ratio"]
 
     def charges_at_zero(self, hwnd):
+        """True when any skill slot's charge badge reads 0."""
         w, h = client_size(hwnd)
         s = h / self.cfg["hud_reference_size"][1]
         ox, oy = client_origin(hwnd)
-        x0, y0, x1, y1 = CHARGE_BOX
         cx, by = ox + w / 2, oy + h
-        area = half_size(ImageGrab.grab(
-            bbox=(round(cx + x0 * s), round(by + y0 * s), round(cx + x1 * s), round(by + y1 * s)),
-            all_screens=True).convert("L"))
-        diffs = {}
-        for digit, tpl in self.charge_templates.items():
-            live = area if area.size == tpl.size else area.resize(tpl.size, Image.BOX)
-            diffs[digit] = ImageStat.Stat(ImageChops.difference(live, tpl)).mean[0]
-        zero = diffs["0"]
-        return zero <= CHARGE_MAX_DIFF and min(diffs["1"], diffs["2"]) - zero >= CHARGE_MIN_GAP
+        bw, bh = CHARGE_SIZE
+        m = 2  # px of slack around each digit box, at 1440p
+        left, right = CHARGE_SLOTS_X[0] - m, CHARGE_SLOTS_X[-1] + bw + m
+        top, bottom = CHARGE_Y - m, CHARGE_Y + bh + m
+        # One grab of the whole row, brought to 1440p, then to half size.
+        strip = ImageGrab.grab(bbox=(round(cx + left * s), round(by + top * s),
+                                     round(cx + right * s), round(by + bottom * s)),
+                               all_screens=True).convert("L")
+        strip = half_size(strip.resize((right - left, bottom - top), Image.BOX))
+        tw, th = bw // 2, bh // 2
+        for x in CHARGE_SLOTS_X:
+            sx = (x - left) // 2
+            for dx in range(m + 1):
+                for dy in range(m + 1):
+                    live = normalised(strip.crop((sx + dx - 1, dy, sx + dx - 1 + tw, dy + th)))
+                    score = {d: sum(a * b for a, b in zip(live, tpl)) / len(live)
+                             for d, tpl in self.charge_templates.items()}
+                    if (score["0"] >= CHARGE_MIN_SCORE
+                            and score["0"] - max(score["1"], score["2"]) >= CHARGE_MIN_LEAD):
+                        return True
+        return False
 
     def dps_panel_open(self, hwnd):
         s = client_size(hwnd)[1] / self.cfg["hud_reference_size"][1]
