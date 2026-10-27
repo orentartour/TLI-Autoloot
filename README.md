@@ -5,11 +5,15 @@ Tray tool for Torchlight Infinite:
 - Spams Q (every 0.1s) while the game is focused and no menu is open. Menus are
   detected by the flame icon in the top-right HUD disappearing.
 - Auto chest/mechanics: presses D while the grey finger icon above the D slot
-  is on screen (it always appears at the same spot).
-- Spin-off **TLI Autoloot A**: everything above, plus it presses A while the
-  skill in slot A shows 0 charges on its yellow badge.
-- Options window (left-click the tray icon, or right-click > Options): rebind the pause, spam and auto
-  keys, and turn auto chest/mechanics on or off.
+  is on screen, except while the DPS meter panel is open.
+- Spin-off **TLI Autoloot A** adds IRIS 2 auto blink. When the skill's yellow
+  charge badge (in any skill slot) shows 0, Blink (A) is pressed according to
+  the mode:
+  - `+` presses Blink automatically
+  - `=` presses Blink on each right click
+  - `-` is off
+- Options panel (left-click the tray icon): rebind Pause, Spam, Loot and Blink,
+  toggle chests & mechanics, and pick the IRIS 2 auto blink mode.
 
 ## Hotkeys
 
