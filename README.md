@@ -22,7 +22,9 @@ Tray tool for Torchlight Infinite:
 ## Build
 
 ```powershell
-.\build.ps1   # needs Python 3.13 with pystray, Pillow and PyInstaller
+.\build.ps1      # TLI Autoloot
+.\build.ps1 -A   # the TLI Autoloot A spin-off
+# needs Python 3.13 with pystray, Pillow and PyInstaller
 ```
 
 The game runs elevated, so the app needs admin too. On first launch it asks
