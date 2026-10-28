@@ -5,12 +5,13 @@ While the game is the active window:
   top-right HUD disappears).
 - Auto loot: presses D while the grey finger icon above the D slot shows,
   except while the DPS meter panel is open.
-- Spin-off "TLI Autoloot A" (tli_autoloot_a.py), IRIS 2 auto blink: when a
-  skill's yellow charge badge reads 0, presses Blink (A), either by itself
-  ("+") or on each right click ("="), or never ("-").
+- IRIS 2 auto blink: when a skill's yellow charge badge reads 0, presses
+  Blink (A), either by itself ("+") or on each right click ("="), or never
+  ("-"). IRIS 2 auto form: when the green S buff is missing from the top-left
+  buff bar, presses Form (F). Both are off until turned on.
 
-F8 pauses / resumes everything. Keys, the auto loot switch and the blink mode
-are in the Options panel (left-click the tray icon).
+F8 pauses / resumes everything. Keys and switches are in the Options panel
+(left-click the tray icon).
 
 Tray icon colour: green = spamming, orange = menu open,
 grey = game not focused, red = paused.
@@ -26,7 +27,6 @@ import sys
 import threading
 import time
 import tkinter as tk
-import winsound
 
 import pystray
 from PIL import Image, ImageChops, ImageDraw, ImageGrab, ImageStat, ImageTk
@@ -44,8 +44,6 @@ else:
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 APP_NAME = "TLI Autoloot"
 TASK_NAME = "TLI Autoloot"
-# Set by the spin-off entry point (tli_autoloot_a.py).
-A_ON_ZERO = False
 
 GAME_PROCESS = "torchlight_infinite.exe"
 DEFAULT_CONFIG = {
@@ -57,7 +55,12 @@ DEFAULT_CONFIG = {
     "auto_interval_seconds": 0.3,
     "zero_scancode": 0x10,  # physical key that types A on AZERTY
     "zero_interval_seconds": 0.5,
-    "iris_mode": "=",  # IRIS 2 auto blink: "+" auto, "=" on right click, "-" off
+    # IRIS 2: all off until turned on in Options, then kept.
+    "iris_mode": "-",  # auto blink: "+" auto, "=" on right click, "-" off
+    "iris_open": False,  # Options section expanded
+    "form_enabled": False,  # auto form
+    "form_scancode": 0x21,  # F
+    "form_interval_seconds": 1.5,
 }
 
 # Positions are in pixels of the game at 2560x1440; the UI scales with the
@@ -88,7 +91,7 @@ AUTO_HALF = 20
 # left, and the share of it that must be slate to skip the press.
 PANEL_REGION = (60, 170, 420, 560)
 PANEL_MIN_SHARE = 0.4
-# Spin-off: the charge digit on the yellow badge of a skill. Left edges of the
+# IRIS 2 auto blink: the charge digit on the yellow badge of a skill. Left edges of the
 # 14x16 digit box in each skill slot (mouse, A, Z, E, R, F) and its top, from
 # the bottom centre of a 1440-high window: the badge follows the skill.
 CHARGE_SLOTS_X = [-246 + 94 * k for k in range(6)]
@@ -99,6 +102,16 @@ CHARGE_SIZE = (14, 16)
 # over 1 and 2.
 CHARGE_MIN_SCORE = 0.6
 CHARGE_MIN_LEAD = 0.3
+# IRIS 2 auto form: the green S form buff in the top-left buff bar. Left edges of the
+# buff slots and their top, from the top left of a 1440-high window: buffs
+# shift left as others expire. Only the icon's top is compared (the stack count
+# sits in its bottom right), by shape like the charge digits.
+FORM_SLOTS_X = [409 + round(54.375 * k) for k in range(12)]
+FORM_Y = 26
+FORM_SIZE = (42, 20)
+FORM_MIN_SCORE = 0.6
+# Consecutive missed buff checks before pressing Form.
+FORM_MISSES = 2
 
 VK_RBUTTON, VK_ESCAPE = 0x02, 0x1B
 # Keys a pause bind can use: everything except mouse buttons.
@@ -277,6 +290,10 @@ def load_charge_templates():
             for d in "012"}
 
 
+def load_form_template():
+    return normalised(half_size(Image.open(os.path.join(TEMPLATE_DIR, "form.png"))))
+
+
 # --- Config ------------------------------------------------------------------
 
 def load_config():
@@ -347,7 +364,8 @@ FONT_KEY = ("Segoe UI Semibold", 9)
 FONT_HEAD = ("Segoe UI Semibold", 8)
 WIDTH = 280
 BINDS = [("pause", "Pause / resume"), ("spam", "Spam"), ("auto", "Loot")]
-SEND_KEYS = {"spam": "key_scancode", "auto": "auto_scancode", "zero": "zero_scancode"}
+SEND_KEYS = {"spam": "key_scancode", "auto": "auto_scancode", "zero": "zero_scancode",
+             "form": "form_scancode"}
 IRIS_MODES = [("+", "Auto"), ("=", "Right click"), ("-", "Off")]
 
 
@@ -356,9 +374,9 @@ def hex_color(rgb):
 
 
 class OptionsWindow:
-    """Small borderless always-on-top panel: keys, the auto loot switch and,
-    in the spin-off, the IRIS 2 auto blink mode. Tk lives in its own thread
-    and re-reads the app state every 100ms."""
+    """Small borderless always-on-top panel: keys, the auto loot switch and
+    the collapsible IRIS 2 section. Tk lives in its own thread and re-reads
+    the app state every 100ms."""
 
     def __init__(self, app):
         self.app = app
@@ -431,58 +449,92 @@ class OptionsWindow:
             tk.Frame(panel, bg=LINE, height=1).grid(row=row_no[0], column=0, sticky="sew")
             row_no[0] += 1
 
-        def row(label):
-            f = tk.Frame(panel, bg=ROW, padx=8, pady=4)
-            f.grid(row=row_no[0], column=0, sticky="we", pady=1)
+        def row(label, parent=None):
+            """A labelled row on the panel, or packed into a section's body."""
+            f = tk.Frame(parent or panel, bg=ROW, padx=8, pady=4)
+            if parent:
+                f.pack(fill="x", pady=1)
+            else:
+                f.grid(row=row_no[0], column=0, sticky="we", pady=1)
+                row_no[0] += 1
             tk.Label(f, text=label, font=FONT, bg=ROW, fg=FG, anchor="w").pack(side="left")
-            row_no[0] += 1
             return f
 
         # Keys: bordered chips like the game's key labels; click, then press a key.
-        section("KEYS")
         chips = {}
-        binds = BINDS + ([("zero", "Blink")] if A_ON_ZERO else [])
-        for which, label in binds:
-            chip = tk.Label(row(label), font=FONT_KEY, width=7, bg=BG, fg=FG,
+
+        def add_chip(which, label, parent=None):
+            chip = tk.Label(row(label, parent), font=FONT_KEY, width=7, bg=BG, fg=FG,
                             highlightthickness=1, highlightbackground=LINE, cursor="hand2")
             chip.pack(side="right")
-            chip.bind("<Button-1>", lambda _, w=which: app.start_rebind(w))
+            chip.bind("<Button-1>", lambda _: app.start_rebind(which))
             chips[which] = chip
+
+        section("KEYS")
+        for which, label in BINDS:
+            add_chip(which, label)
 
         # Auto loot switch.
         section("AUTO LOOT")
-        switch = tk.Canvas(row("Chests & mechanics"), width=34, height=18, bg=ROW,
+        switches = {}  # config key -> canvas
+
+        def add_switch(label, key, toggle, parent=None):
+            sw = tk.Canvas(row(label, parent), width=34, height=18, bg=ROW,
                            highlightthickness=0, cursor="hand2")
-        switch.pack(side="right")
-        switch.bind("<Button-1>", lambda _: app.toggle_auto())
+            sw.pack(side="right")
+            sw.bind("<Button-1>", lambda _: toggle())
+            switches[key] = sw
 
-        def draw_switch(on):
-            switch.delete("all")
+        def draw_switch(sw, on):
+            sw.delete("all")
             track = GOLD if on else LINE
-            switch.create_oval(1, 1, 17, 17, fill=track, outline=track)
-            switch.create_oval(17, 1, 33, 17, fill=track, outline=track)
-            switch.create_rectangle(9, 1, 25, 17, fill=track, outline=track)
+            sw.create_oval(1, 1, 17, 17, fill=track, outline=track)
+            sw.create_oval(17, 1, 33, 17, fill=track, outline=track)
+            sw.create_rectangle(9, 1, 25, 17, fill=track, outline=track)
             x = 18 if on else 2
-            switch.create_oval(x, 2, x + 14, 16, fill=FG if on else DIM, outline="")
+            sw.create_oval(x, 2, x + 14, 16, fill=FG if on else DIM, outline="")
 
-        # IRIS 2 auto blink: three-stop slider + > = > -.
-        slider = None
-        if A_ON_ZERO:
-            section("IRIS 2 AUTO BLINK")
-            box = tk.Frame(panel, bg=ROW, padx=8, pady=6)
-            box.grid(row=row_no[0], column=0, sticky="we", pady=1)
-            row_no[0] += 1
-            sw = WIDTH - 2 * 12 - 2 * 8
-            slider = tk.Canvas(box, width=sw, height=54, bg=ROW, highlightthickness=0,
-                               cursor="hand2")
-            slider.pack()
-            stops = [round(30 + i * (sw - 60) / 2) for i in range(3)]
+        add_switch("Chests & mechanics", "auto_enabled", app.toggle_auto)
 
-            def pick(e):
-                i = min(range(3), key=lambda k: abs(stops[k] - e.x))
-                app.set_iris(IRIS_MODES[i][0])
-            slider.bind("<Button-1>", pick)
-            slider.bind("<B1-Motion>", pick)
+        # IRIS 2, collapsible: auto blink (a three-stop slider + > = > -) and
+        # auto form, each with its key.
+        head2 = tk.Frame(panel, bg=BG, cursor="hand2")
+        head2.grid(row=row_no[0], column=0, sticky="we", pady=(10, 3))
+        tk.Frame(panel, bg=LINE, height=1).grid(row=row_no[0], column=0, sticky="sew")
+        row_no[0] += 1
+        tk.Label(head2, text="IRIS 2", font=FONT_HEAD, bg=BG, fg=GOLD).pack(side="left")
+        chevron = tk.Label(head2, font=FONT_HEAD, bg=BG, fg=GOLD)
+        chevron.pack(side="right")
+        iris_summary = tk.Label(head2, font=FONT_HEAD, bg=BG, fg=DIM)
+        iris_summary.pack(side="right", padx=(0, 6))
+        for w in (head2, *head2.winfo_children()):
+            w.bind("<Button-1>", lambda _: app.toggle_iris_open())
+        iris_body = tk.Frame(panel, bg=BG)
+        iris_body.grid(row=row_no[0], column=0, sticky="we")
+        row_no[0] += 1
+
+        box = tk.Frame(iris_body, bg=ROW, padx=8, pady=4)
+        box.pack(fill="x", pady=1)
+        tk.Label(box, text="Auto Blink", font=FONT, bg=ROW, fg=FG, anchor="w").pack(fill="x")
+        sw = WIDTH - 2 * 12 - 2 * 8
+        slider = tk.Canvas(box, width=sw, height=54, bg=ROW, highlightthickness=0,
+                           cursor="hand2")
+        slider.pack()
+        stops = [round(30 + i * (sw - 60) / 2) for i in range(3)]
+
+        def pick(e):
+            i = min(range(3), key=lambda k: abs(stops[k] - e.x))
+            app.set_iris(IRIS_MODES[i][0])
+        slider.bind("<Button-1>", pick)
+        slider.bind("<B1-Motion>", pick)
+        add_chip("zero", "Blink key", iris_body)
+        add_switch("Auto Form", "form_enabled", app.toggle_form, iris_body)
+        add_chip("form", "Form key", iris_body)
+
+        def place(height):
+            """Resizes the window, keeping its bottom edge where it is."""
+            bottom = root.winfo_y() + root.winfo_height()
+            root.geometry(f"{WIDTH}x{height}+{root.winfo_x()}+{bottom - height}")
 
         def draw_slider(mode):
             slider.delete("all")
@@ -520,20 +572,36 @@ class OptionsWindow:
                             highlightbackground=GOLD if waiting else LINE,
                             fg=GOLD if waiting else FG)
             # Canvases are redrawn only when their value changes.
-            if drawn.get("auto") != app.cfg["auto_enabled"]:
-                drawn["auto"] = app.cfg["auto_enabled"]
-                draw_switch(drawn["auto"])
-            if slider and drawn.get("iris") != app.cfg["iris_mode"]:
+            for key, sw in switches.items():
+                if drawn.get(key) != app.cfg[key]:
+                    drawn[key] = app.cfg[key]
+                    draw_switch(sw, drawn[key])
+            if drawn.get("iris") != app.cfg["iris_mode"]:
                 drawn["iris"] = app.cfg["iris_mode"]
                 draw_slider(drawn["iris"])
+            on = app.cfg["iris_mode"] != "-" or app.cfg["form_enabled"]
+            iris_summary.config(text="ON" if on else "OFF", fg=GOLD if on else DIM)
+            if drawn.get("open") != app.cfg["iris_open"]:
+                drawn["open"] = app.cfg["iris_open"]
+                chevron.config(text="▾" if drawn["open"] else "▸")
+                if drawn["open"]:
+                    iris_body.grid()
+                else:
+                    iris_body.grid_remove()
+                if "placed" in drawn:
+                    root.update_idletasks()
+                    place(root.winfo_reqheight())
             root.after(100, refresh)
 
         # Bottom-right of the work area, above the tray.
+        if not app.cfg["iris_open"]:
+            iris_body.grid_remove()
         root.update_idletasks()
         work = wt.RECT()
         user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(work), 0)  # SPI_GETWORKAREA
         root.geometry(f"{WIDTH}x{root.winfo_reqheight()}"
                       f"+{work.right - WIDTH - 16}+{work.bottom - root.winfo_reqheight() - 16}")
+        drawn["placed"] = True
         try:  # Windows 11 rounded corners
             hwnd = user32.GetParent(root.winfo_id())
             pref = ctypes.c_int(2)  # DWMWCP_ROUND
@@ -559,7 +627,10 @@ class Autoloot:
         self.next_auto = 0.0
         self.next_zero = 0.0
         self.mouse_was_down = False
-        self.charge_templates = load_charge_templates() if A_ON_ZERO else None
+        self.charge_templates = load_charge_templates()
+        self.form_template = load_form_template()
+        self.next_form = 0.0
+        self.form_misses = 0
         self.options = OptionsWindow(self)
         self.running = True
         self.state = None
@@ -634,6 +705,30 @@ class Autoloot:
                         return True
         return False
 
+    def form_buff_visible(self, hwnd):
+        """True when the green S form buff is in any buff slot."""
+        s = ui_scale(hwnd)
+        ox, oy = client_origin(hwnd)
+        bw, bh = FORM_SIZE
+        m = 2  # px of slack around each icon, at 1440p
+        left, right = FORM_SLOTS_X[0] - m, FORM_SLOTS_X[-1] + bw + m
+        top, bottom = FORM_Y - m, FORM_Y + bh + m
+        # One grab of the whole bar, brought to 1440p, then to half size.
+        strip = ImageGrab.grab(bbox=(round(ox + left * s), round(oy + top * s),
+                                     round(ox + right * s), round(oy + bottom * s)),
+                               all_screens=True).convert("L")
+        strip = half_size(strip.resize((right - left, bottom - top), Image.BOX))
+        tw, th = bw // 2, bh // 2
+        tpl = self.form_template
+        for x in FORM_SLOTS_X:
+            sx = (x - left) // 2
+            for dx in range(m + 1):
+                for dy in range(m + 1):
+                    live = normalised(strip.crop((sx + dx - 1, dy, sx + dx - 1 + tw, dy + th)))
+                    if sum(a * b for a, b in zip(live, tpl)) / len(live) >= FORM_MIN_SCORE:
+                        return True
+        return False
+
     def dps_panel_open(self, hwnd):
         s = ui_scale(hwnd)
         ox, oy = client_origin(hwnd)
@@ -648,7 +743,14 @@ class Autoloot:
     def toggle_auto(self):
         self.cfg["auto_enabled"] = not self.cfg["auto_enabled"]
         save_config(self.cfg)
-        winsound.Beep(900 if self.cfg["auto_enabled"] else 500, 100)
+
+    def toggle_form(self):
+        self.cfg["form_enabled"] = not self.cfg["form_enabled"]
+        save_config(self.cfg)
+
+    def toggle_iris_open(self):
+        self.cfg["iris_open"] = not self.cfg["iris_open"]
+        save_config(self.cfg)
 
     def set_iris(self, mode):
         if mode != self.cfg["iris_mode"]:
@@ -657,7 +759,6 @@ class Autoloot:
 
     def toggle_pause(self):
         self.paused = not self.paused
-        winsound.Beep(500 if self.paused else 900, 100)
 
     def set_state(self, state):
         if state != self.state and self.icon:
@@ -668,8 +769,6 @@ class Autoloot:
     def start_rebind(self, which):
         self.rebinding = which
         self.icon.update_menu()
-        winsound.Beep(1000, 80)
-        winsound.Beep(1000, 80)
 
     def can_bind(self, vk):
         """Never the Windows keys (Win+Shift+S etc. while waiting). Sent keys
@@ -688,7 +787,6 @@ class Autoloot:
         if VK_ESCAPE in pressed:
             self.rebinding = None
             self.icon.update_menu()
-            winsound.Beep(400, 120)
         elif pressed:
             vk = pressed[0]
             if self.rebinding == "pause":
@@ -698,8 +796,6 @@ class Autoloot:
                 self.cfg[SEND_KEYS[self.rebinding]] = user32.MapVirtualKeyW(vk, 0)
             save_config(self.cfg)
             self.rebinding = None
-            winsound.Beep(1200, 120)
-            winsound.Beep(1500, 120)
             self.icon.update_menu()
         return now
 
@@ -740,9 +836,9 @@ class Autoloot:
                     # Held a bit longer than Q: interaction keys can miss a 15ms tap.
                     tap_key(self.cfg["auto_scancode"], hold=0.05)
                     self.next_auto = now + self.cfg["auto_interval_seconds"]
-            # Spin-off, IRIS 2 auto blink, while the charge badge reads 0:
+            # IRIS 2 auto blink, while the charge badge reads 0:
             # "+" presses A by itself, "=" presses A on each right click, "-" is off.
-            iris = self.cfg["iris_mode"] if A_ON_ZERO else "-"
+            iris = self.cfg["iris_mode"]
             mouse_down = key_down(VK_RBUTTON)
             clicked = mouse_down and not self.mouse_was_down
             self.mouse_was_down = mouse_down
@@ -754,6 +850,16 @@ class Autoloot:
                         self.next_zero = now + self.cfg["zero_interval_seconds"]
                 elif iris == "=" and clicked and self.charges_at_zero(hwnd):
                     tap_key(self.cfg["zero_scancode"], hold=0.05)
+            # IRIS 2 auto form: Form (F) once when the buff is gone,
+            # then time for it to come back before checking again.
+            if (state == "spamming" and self.cfg["form_enabled"]
+                    and now >= self.next_form):
+                self.next_form = now + 0.2
+                self.form_misses = 0 if self.form_buff_visible(hwnd) else self.form_misses + 1
+                if self.form_misses >= FORM_MISSES:
+                    tap_key(self.cfg["form_scancode"], hold=0.05)
+                    self.form_misses = 0
+                    self.next_form = now + self.cfg["form_interval_seconds"]
             time.sleep(0.01)
 
     def quit(self, icon, _item=None):
