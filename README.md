@@ -13,13 +13,14 @@ window it:
 Two optional automations, both **off by default**. Turn them on in the IRIS 2
 section of Options and they stay on.
 
-- **Auto Blink:** when a skill's yellow charge badge reads 0, presses Blink (A).
+- **Full Auto:** while you hold right click, it runs the right-click skill
+  and Blink (A) for you:
+  - while the right-click skill has charges, it right clicks every 0.7s
+  - at 0 charges, it presses Blink every 0.1s until Blink goes on cooldown
+    (the grey stop sign on its icon)
+  - once charges are back, it waits 0.3s and right clicks again
 
-  | Mode | Blink |
-  | --- | --- |
-  | `+` | pressed automatically |
-  | `=` | pressed on each right click |
-  | `-` | off |
+  Let go of right click and it stops.
 
 - **Auto Form:** when the green S buff is missing from the top-left buff bar,
   presses Form (F) once. Its stack count doesn't matter.
@@ -46,8 +47,8 @@ Left-click the tray icon to open the Options panel. From there you can:
 - rebind Pause / resume (F8 by default), Spam and Loot: click a key, then
   press the new one (Esc cancels)
 - switch chests & mechanics looting on or off
-- open the IRIS 2 section (click its header) to set the Auto Blink mode, turn
-  Auto Form on or off, and rebind Blink and Form
+- open the IRIS 2 section (click its header) to turn Full Auto and Auto Form
+  on or off, and rebind Blink and Form
 
 The default keys are the AZERTY positions of Q and A. On QWERTY, rebind Spam
 and Blink once.

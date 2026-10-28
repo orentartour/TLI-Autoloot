@@ -5,10 +5,10 @@ While the game is the active window:
   top-right HUD disappears).
 - Auto loot: presses D while the grey finger icon above the D slot shows,
   except while the DPS meter panel is open.
-- IRIS 2 auto blink: when a skill's yellow charge badge reads 0, presses
-  Blink (A), either by itself ("+") or on each right click ("="), or never
-  ("-"). IRIS 2 auto form: when the green S buff is missing from the top-left
-  buff bar, presses Form (F). Both are off until turned on.
+- IRIS 2 Full Auto, while the right button is held: right clicks while the
+  right-click skill has charges, and at 0 charges presses Blink (A) until it
+  goes on cooldown. IRIS 2 auto form: when the green S buff is missing from
+  the top-left buff bar, presses Form (F). Both are off until turned on.
 
 F8 pauses / resumes everything. Keys and switches are in the Options panel
 (left-click the tray icon).
@@ -20,6 +20,7 @@ grey = game not focused, red = paused.
 import ctypes
 import ctypes.wintypes as wt
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -53,12 +54,11 @@ DEFAULT_CONFIG = {
     "auto_enabled": True,
     "auto_scancode": 0x20,  # D
     "auto_interval_seconds": 0.3,
-    "zero_scancode": 0x10,  # physical key that types A on AZERTY
-    "zero_interval_seconds": 0.5,
+    "zero_scancode": 0x10,  # Blink: physical key that types A on AZERTY
     # IRIS 2: all off until turned on in Options, then kept.
-    "iris_mode": "-",  # auto blink: "+" auto, "=" on right click, "-" off
     "iris_open": False,  # Options section expanded
     "form_enabled": False,  # auto form
+    "full_auto": False,  # Blink and right clicks in turn while right click is held
     "form_scancode": 0x21,  # F
     "form_interval_seconds": 1.5,
 }
@@ -91,11 +91,10 @@ AUTO_HALF = 20
 # left, and the share of it that must be slate to skip the press.
 PANEL_REGION = (60, 170, 420, 560)
 PANEL_MIN_SHARE = 0.4
-# IRIS 2 auto blink: the charge digit on the yellow badge of a skill. Left edges of the
-# 14x16 digit box in each skill slot (mouse, A, Z, E, R, F) and its top, from
-# the bottom centre of a 1440-high window: the badge follows the skill.
-CHARGE_SLOTS_X = [-246 + 94 * k for k in range(6)]
-CHARGE_Y = -140
+# IRIS 2 Full Auto: the charge digit on the yellow badge of the right-click
+# (mouse slot) skill. Left edge and top of its 14x16 box, from the bottom
+# centre of a 1440-high window.
+CHARGE_X, CHARGE_Y = -246, -140
 CHARGE_SIZE = (14, 16)
 # Digits are compared by shape (normalised correlation), which holds up when
 # the cooldown overlay darkens the icon. 0 needs this score, and this lead
@@ -112,8 +111,47 @@ FORM_SIZE = (42, 20)
 FORM_MIN_SCORE = 0.6
 # Consecutive missed buff checks before pressing Form.
 FORM_MISSES = 2
+# IRIS 2 Full Auto: the grey stop sign drawn over the Blink skill while it's on
+# cooldown. Skill icon centres (mouse, A, Z, E, R, F) and their height, from
+# the bottom centre of a 1440-high window, and the slot of each Blink key.
+SKILL_SLOTS_X = [-240 + 94 * k for k in range(6)]
+SKILL_Y = -157
+SLOT_OF_SCANCODE = {0x10: 1, 0x11: 2, 0x12: 3, 0x13: 4, 0x21: 5}  # A Z E R F
+# The sign is a ring (this radius) with a slash. Points on it are sampled
+# against points either side: the sign is grey, so clearly less saturated than
+# the icon around it, even under the glow of a press. Share of points that
+# must say so, and by how much.
+STOP_RADIUS = 18
+STOP_MIN_SHARE = 0.45
+STOP_SAT_GAP = 25
+# Cooldown-free reads in a row before Blink counts as ready (the brightest
+# frames of the press glow wash the sign out).
+READY_READS = 2
+# How often Full Auto looks at the screen, the gaps between Blink presses and
+# between right clicks, and the pause between Blink going on cooldown and the
+# first right click.
+FULL_AUTO_TICK = 0.05
+FULL_AUTO_BLINK_GAP = 0.1
+FULL_AUTO_CLICK_GAP = 0.7
+FULL_AUTO_DELAY = 0.3
 
-VK_RBUTTON, VK_ESCAPE = 0x02, 0x1B
+
+def stop_sign_samples():
+    """(on, inside, outside) offsets from the icon centre, at 1440p."""
+    out = []
+    for i in range(36):
+        a = i * math.pi / 18
+        c, s = math.cos(a), math.sin(a)
+        out.append([(r * c, r * s) for r in (STOP_RADIUS, STOP_RADIUS - 5, STOP_RADIUS + 5)])
+    for i in range(9):  # the slash, bottom left to top right
+        t = (i - 4) / 4 * STOP_RADIUS * 0.6 * 0.707
+        out.append([(t, -t), (t - 3.5, -t - 3.5), (t + 3.5, -t + 3.5)])
+    return [[(round(x), round(y)) for x, y in pts] for pts in out]
+
+
+STOP_SAMPLES = stop_sign_samples()
+
+VK_ESCAPE = 0x1B
 # Keys a pause bind can use: everything except mouse buttons.
 BINDABLE_VKS = [vk for vk in range(0x08, 0xFF) if vk != VK_ESCAPE]
 # Keys whose name lookup needs the "extended" flag (arrows, Insert, ...).
@@ -168,6 +206,60 @@ def tap_key(scancode, hold=0.015):
     send_scancode(scancode, up=False)
     time.sleep(hold)
     send_scancode(scancode, up=True)
+
+
+INPUT_MOUSE = 0
+MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP = 0x0008, 0x0010
+
+
+def right_click(hold=0.03):
+    for flags in (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP):
+        inp = INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(0, 0, 0, flags, 0, 0))
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        if flags == MOUSEEVENTF_RIGHTDOWN:
+            time.sleep(hold)
+
+
+# --- Physical right button ---------------------------------------------------
+# Full Auto sends right clicks while the user holds the right button, so the
+# button's async state can't tell whether it's still held. A low-level mouse
+# hook sees only the user's own clicks (injected ones are flagged).
+
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [("pt", wt.POINT), ("mouseData", wt.DWORD), ("flags", wt.DWORD),
+                ("time", wt.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+HOOKPROC = ctypes.WINFUNCTYPE(wt.LPARAM, ctypes.c_int, wt.WPARAM, wt.LPARAM)
+user32.SetWindowsHookExW.restype = wt.HHOOK
+user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wt.HINSTANCE, wt.DWORD]
+user32.CallNextHookEx.restype = wt.LPARAM
+user32.CallNextHookEx.argtypes = [wt.HHOOK, ctypes.c_int, wt.WPARAM, wt.LPARAM]
+kernel32.GetModuleHandleW.restype = wt.HMODULE
+WH_MOUSE_LL, WM_RBUTTONDOWN, WM_RBUTTONUP, LLMHF_INJECTED = 14, 0x0204, 0x0205, 0x01
+
+
+class RightButton:
+    """Whether the user is physically holding the right mouse button."""
+
+    def __init__(self):
+        self.held = False
+        self.proc = HOOKPROC(self.hook)  # kept referenced while the hook lives
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def hook(self, code, wparam, lparam):
+        if code == 0 and wparam in (WM_RBUTTONDOWN, WM_RBUTTONUP):
+            info = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+            if not info.flags & LLMHF_INJECTED:
+                self.held = wparam == WM_RBUTTONDOWN
+        return user32.CallNextHookEx(None, code, wparam, lparam)
+
+    def run(self):
+        user32.SetWindowsHookExW(WH_MOUSE_LL, self.proc, kernel32.GetModuleHandleW(None), 0)
+        msg = wt.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
 
 
 # --- Window / screen helpers -------------------------------------------------
@@ -366,7 +458,6 @@ WIDTH = 280
 BINDS = [("pause", "Pause / resume"), ("spam", "Spam"), ("auto", "Loot")]
 SEND_KEYS = {"spam": "key_scancode", "auto": "auto_scancode", "zero": "zero_scancode",
              "form": "form_scancode"}
-IRIS_MODES = [("+", "Auto"), ("=", "Right click"), ("-", "Off")]
 
 
 def hex_color(rgb):
@@ -496,8 +587,7 @@ class OptionsWindow:
 
         add_switch("Chests & mechanics", "auto_enabled", app.toggle_auto)
 
-        # IRIS 2, collapsible: auto blink (a three-stop slider + > = > -) and
-        # auto form, each with its key.
+        # IRIS 2, collapsible: Full Auto and auto form, each with its key.
         head2 = tk.Frame(panel, bg=BG, cursor="hand2")
         head2.grid(row=row_no[0], column=0, sticky="we", pady=(10, 3))
         tk.Frame(panel, bg=LINE, height=1).grid(row=row_no[0], column=0, sticky="sew")
@@ -513,20 +603,7 @@ class OptionsWindow:
         iris_body.grid(row=row_no[0], column=0, sticky="we")
         row_no[0] += 1
 
-        box = tk.Frame(iris_body, bg=ROW, padx=8, pady=4)
-        box.pack(fill="x", pady=1)
-        tk.Label(box, text="Auto Blink", font=FONT, bg=ROW, fg=FG, anchor="w").pack(fill="x")
-        sw = WIDTH - 2 * 12 - 2 * 8
-        slider = tk.Canvas(box, width=sw, height=54, bg=ROW, highlightthickness=0,
-                           cursor="hand2")
-        slider.pack()
-        stops = [round(30 + i * (sw - 60) / 2) for i in range(3)]
-
-        def pick(e):
-            i = min(range(3), key=lambda k: abs(stops[k] - e.x))
-            app.set_iris(IRIS_MODES[i][0])
-        slider.bind("<Button-1>", pick)
-        slider.bind("<B1-Motion>", pick)
+        add_switch("Full Auto (hold right click)", "full_auto", app.toggle_full_auto, iris_body)
         add_chip("zero", "Blink key", iris_body)
         add_switch("Auto Form", "form_enabled", app.toggle_form, iris_body)
         add_chip("form", "Form key", iris_body)
@@ -535,22 +612,6 @@ class OptionsWindow:
             """Resizes the window, keeping its bottom edge where it is."""
             bottom = root.winfo_y() + root.winfo_height()
             root.geometry(f"{WIDTH}x{height}+{root.winfo_x()}+{bottom - height}")
-
-        def draw_slider(mode):
-            slider.delete("all")
-            sel = [m for m, _ in IRIS_MODES].index(mode)
-            y = 25
-            slider.create_line(stops[0], y, stops[2], y, fill=LINE, width=3)
-            slider.create_line(stops[0], y, stops[sel], y, fill=GOLD, width=3)
-            for i, (m, name) in enumerate(IRIS_MODES):
-                on = i == sel
-                slider.create_text(stops[i], 8, text=m, font=("Segoe UI Semibold", 12),
-                                   fill=GOLD if on else DIM)
-                slider.create_text(stops[i], 45, text=name, font=("Segoe UI", 8),
-                                   fill=FG if on else DIM)
-                r = 7 if on else 4
-                slider.create_oval(stops[i] - r, y - r, stops[i] + r, y + r,
-                                   fill=FG if on else (GOLD if i < sel else LINE), outline="")
 
         names = {"pause": lambda: key_name(app.cfg["pause_vk"])}
         names.update({which: lambda k=key: scancode_name(app.cfg[k])
@@ -576,10 +637,7 @@ class OptionsWindow:
                 if drawn.get(key) != app.cfg[key]:
                     drawn[key] = app.cfg[key]
                     draw_switch(sw, drawn[key])
-            if drawn.get("iris") != app.cfg["iris_mode"]:
-                drawn["iris"] = app.cfg["iris_mode"]
-                draw_slider(drawn["iris"])
-            on = app.cfg["iris_mode"] != "-" or app.cfg["form_enabled"]
+            on = app.cfg["full_auto"] or app.cfg["form_enabled"]
             iris_summary.config(text="ON" if on else "OFF", fg=GOLD if on else DIM)
             if drawn.get("open") != app.cfg["iris_open"]:
                 drawn["open"] = app.cfg["iris_open"]
@@ -625,12 +683,14 @@ class Autoloot:
         self.rebinding = None  # a BINDS / SEND_KEYS name while waiting for a key
         self.auto_template = load_auto_template()
         self.next_auto = 0.0
-        self.next_zero = 0.0
-        self.mouse_was_down = False
         self.charge_templates = load_charge_templates()
         self.form_template = load_form_template()
         self.next_form = 0.0
         self.form_misses = 0
+        self.right_button = RightButton()
+        self.fa_phase = None  # Full Auto: None, "blink", "wait" or "click"
+        self.fa_until = self.fa_next_press = self.fa_next_click = self.next_full_auto = 0.0
+        self.ready_reads = READY_READS
         self.options = OptionsWindow(self)
         self.running = True
         self.state = None
@@ -678,32 +738,81 @@ class Autoloot:
         return diff <= contrast * AUTO_MATCH_RATIO
 
     def charges_at_zero(self, hwnd):
-        """True when any skill slot's charge badge reads 0."""
+        """True when the right-click skill's charge badge reads 0."""
         w, h = client_size(hwnd)
         s = ui_scale(hwnd)
         ox, oy = client_origin(hwnd)
         cx, by = ox + w / 2, oy + h
         bw, bh = CHARGE_SIZE
-        m = 2  # px of slack around each digit box, at 1440p
-        left, right = CHARGE_SLOTS_X[0] - m, CHARGE_SLOTS_X[-1] + bw + m
+        m = 2  # px of slack around the digit box, at 1440p
+        left, right = CHARGE_X - m, CHARGE_X + bw + m
         top, bottom = CHARGE_Y - m, CHARGE_Y + bh + m
-        # One grab of the whole row, brought to 1440p, then to half size.
-        strip = ImageGrab.grab(bbox=(round(cx + left * s), round(by + top * s),
-                                     round(cx + right * s), round(by + bottom * s)),
-                               all_screens=True).convert("L")
-        strip = half_size(strip.resize((right - left, bottom - top), Image.BOX))
+        # Brought to 1440p, then to half size.
+        area = ImageGrab.grab(bbox=(round(cx + left * s), round(by + top * s),
+                                    round(cx + right * s), round(by + bottom * s)),
+                              all_screens=True).convert("L")
+        area = half_size(area.resize((right - left, bottom - top), Image.BOX))
         tw, th = bw // 2, bh // 2
-        for x in CHARGE_SLOTS_X:
-            sx = (x - left) // 2
-            for dx in range(m + 1):
-                for dy in range(m + 1):
-                    live = normalised(strip.crop((sx + dx - 1, dy, sx + dx - 1 + tw, dy + th)))
-                    score = {d: sum(a * b for a, b in zip(live, tpl)) / len(live)
-                             for d, tpl in self.charge_templates.items()}
-                    if (score["0"] >= CHARGE_MIN_SCORE
-                            and score["0"] - max(score["1"], score["2"]) >= CHARGE_MIN_LEAD):
-                        return True
+        for dx in range(m + 1):
+            for dy in range(m + 1):
+                live = normalised(area.crop((dx, dy, dx + tw, dy + th)))
+                score = {d: sum(a * b for a, b in zip(live, tpl)) / len(live)
+                         for d, tpl in self.charge_templates.items()}
+                if (score["0"] >= CHARGE_MIN_SCORE
+                        and score["0"] - max(score["1"], score["2"]) >= CHARGE_MIN_LEAD):
+                    return True
         return False
+
+    def blink_stop_sign(self, hwnd):
+        """True when the Blink skill shows the grey cooldown stop sign."""
+        w, h = client_size(hwnd)
+        s = ui_scale(hwnd)
+        ox, oy = client_origin(hwnd)
+        slot = SLOT_OF_SCANCODE.get(self.cfg["zero_scancode"], 1)
+        cx, cy = ox + w / 2 + SKILL_SLOTS_X[slot] * s, oy + h + SKILL_Y * s
+        half = STOP_RADIUS + 8
+        icon = ImageGrab.grab(bbox=(round(cx - half * s), round(cy - half * s),
+                                    round(cx + half * s), round(cy + half * s)),
+                              all_screens=True).convert("RGB")
+        sat = icon.resize((2 * half, 2 * half), Image.BOX).convert("HSV").getchannel("S").load()
+        grey = sum(sat[half + x, half + y] + STOP_SAT_GAP
+                   < min(sat[half + ix, half + iy], sat[half + px, half + py])
+                   for (x, y), (ix, iy), (px, py) in STOP_SAMPLES)
+        return grey >= STOP_MIN_SHARE * len(STOP_SAMPLES)
+
+    def blink_cooling(self, hwnd):
+        """Blink is on cooldown; it counts as ready after READY_READS clear reads."""
+        if self.blink_stop_sign(hwnd):
+            self.ready_reads = 0
+        else:
+            self.ready_reads += 1
+        return self.ready_reads < READY_READS
+
+    def full_auto_step(self, hwnd, now):
+        """One step of Full Auto while the right button is held. Right click,
+        one every FULL_AUTO_CLICK_GAP, while the right-click skill has charges.
+        At 0 charges, Blink until Blink is on cooldown; then, once there are
+        charges, wait FULL_AUTO_DELAY and right click again. Without charges
+        Blink keeps being pressed."""
+        if now < self.next_full_auto:
+            return
+        self.next_full_auto = now + FULL_AUTO_TICK
+        no_charges = self.charges_at_zero(hwnd)
+        if self.fa_phase == "blink" or no_charges:
+            if self.fa_phase != "blink":
+                self.fa_phase, self.ready_reads = "blink", READY_READS
+            if self.blink_cooling(hwnd) and not no_charges:
+                self.fa_phase, self.fa_until = "wait", now + FULL_AUTO_DELAY
+            elif now >= self.fa_next_press:
+                tap_key(self.cfg["zero_scancode"], hold=0.05)
+                self.fa_next_press = now + FULL_AUTO_BLINK_GAP
+        elif self.fa_phase == "wait" and now < self.fa_until:
+            pass
+        else:
+            self.fa_phase = "click"
+            if now >= self.fa_next_click:
+                right_click()
+                self.fa_next_click = now + FULL_AUTO_CLICK_GAP
 
     def form_buff_visible(self, hwnd):
         """True when the green S form buff is in any buff slot."""
@@ -744,6 +853,10 @@ class Autoloot:
         self.cfg["auto_enabled"] = not self.cfg["auto_enabled"]
         save_config(self.cfg)
 
+    def toggle_full_auto(self):
+        self.cfg["full_auto"] = not self.cfg["full_auto"]
+        save_config(self.cfg)
+
     def toggle_form(self):
         self.cfg["form_enabled"] = not self.cfg["form_enabled"]
         save_config(self.cfg)
@@ -751,11 +864,6 @@ class Autoloot:
     def toggle_iris_open(self):
         self.cfg["iris_open"] = not self.cfg["iris_open"]
         save_config(self.cfg)
-
-    def set_iris(self, mode):
-        if mode != self.cfg["iris_mode"]:
-            self.cfg["iris_mode"] = mode
-            save_config(self.cfg)
 
     def toggle_pause(self):
         self.paused = not self.paused
@@ -836,20 +944,12 @@ class Autoloot:
                     # Held a bit longer than Q: interaction keys can miss a 15ms tap.
                     tap_key(self.cfg["auto_scancode"], hold=0.05)
                     self.next_auto = now + self.cfg["auto_interval_seconds"]
-            # IRIS 2 auto blink, while the charge badge reads 0:
-            # "+" presses A by itself, "=" presses A on each right click, "-" is off.
-            iris = self.cfg["iris_mode"]
-            mouse_down = key_down(VK_RBUTTON)
-            clicked = mouse_down and not self.mouse_was_down
-            self.mouse_was_down = mouse_down
-            if state == "spamming" and self.cfg["auto_enabled"]:
-                if iris == "+" and now >= self.next_zero:
-                    self.next_zero = now + 0.1
-                    if self.charges_at_zero(hwnd):
-                        tap_key(self.cfg["zero_scancode"], hold=0.05)
-                        self.next_zero = now + self.cfg["zero_interval_seconds"]
-                elif iris == "=" and clicked and self.charges_at_zero(hwnd):
-                    tap_key(self.cfg["zero_scancode"], hold=0.05)
+            # IRIS 2 Full Auto, while the right button is held.
+            if (state == "spamming" and self.cfg["auto_enabled"]
+                    and self.cfg["full_auto"] and self.right_button.held):
+                self.full_auto_step(hwnd, now)
+            else:
+                self.fa_phase = None
             # IRIS 2 auto form: Form (F) once when the buff is gone,
             # then time for it to come back before checking again.
             if (state == "spamming" and self.cfg["form_enabled"]
