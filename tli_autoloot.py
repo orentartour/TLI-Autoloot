@@ -5,10 +5,16 @@ While the game is the active window:
   top-right HUD disappears).
 - Auto loot: presses D while the grey finger icon above the D slot shows,
   except while the DPS meter panel is open.
+- Auto Pirate (Void Sea): D on the purple pirate icon and on the Void Sea
+  treasure, V on the V icon in the top right (V and the pirate D take turns),
+  and Esc once Confirm is clicked on the Seal or Terminal screen they open.
+- Auto CutScene: Esc to skip boss cutscenes, right after a boss dies or a map
+  loads.
 - IRIS 2 Full Auto, while the right button is held: right clicks while the
   right-click skill has charges, and at 0 charges presses Blink (A) until it
   goes on cooldown. IRIS 2 auto form: when the green S buff is missing from
-  the top-left buff bar, presses Form (F). Both are off until turned on.
+  the top-left buff bar, presses Form (F).
+Everything but auto loot is off until turned on.
 
 F8 pauses / resumes everything. Keys and switches are in the Options panel
 (left-click the tray icon).
@@ -30,7 +36,7 @@ import time
 import tkinter as tk
 
 import pystray
-from PIL import Image, ImageChops, ImageDraw, ImageGrab, ImageStat, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageStat, ImageTk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Built as an exe: bundled files are unpacked to a temp dir; settings live in
@@ -41,7 +47,7 @@ if getattr(sys, "frozen", False):
     DATA_DIR = os.path.join(os.environ["APPDATA"], "TLI Autoloot")
     OLD_DATA_DIR = os.path.join(os.environ["APPDATA"], "TLIQSpam")  # before 2.1
 else:
-    DATA_DIR = OLD_DATA_DIR = HERE
+    DATA_DIR, OLD_DATA_DIR = HERE, None  # run from source: nothing to migrate
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 APP_NAME = "TLI Autoloot"
 TASK_NAME = "TLI Autoloot"
@@ -52,10 +58,11 @@ DEFAULT_CONFIG = {
     "key_scancode": 0x1E,  # physical key that types Q on AZERTY
     "pause_vk": 0x77,  # F8
     "auto_enabled": True,
-    "pirate_enabled": False,  # D on the purple pirate icon, same spot
-    "pirate_v_scancode": 0x2F,  # V, pressed on the pirate V icon (top right)
     "auto_scancode": 0x20,  # D
     "auto_interval_seconds": 0.3,
+    "pirate_enabled": False,  # Auto Pirate (Void Sea)
+    "pirate_v_scancode": 0x2F,  # V, pressed on the pirate V icon (top right)
+    "cutscene_enabled": False,  # Auto CutScene
     "zero_scancode": 0x10,  # Blink: physical key that types A on AZERTY
     # IRIS 2: all off until turned on in Options, then kept.
     "iris_open": False,  # Options section expanded
@@ -78,8 +85,9 @@ BRIGHTNESS = 170
 # How far (px) the icon may shift from its spot and still match.
 SEARCH_MARGIN = 6
 # Consecutive missed icon checks before calling it a menu (ignores flashes).
-MISSES_FOR_MENU = 3
-HUD_CHECK_INTERVAL = 0.05
+# No screen check runs more often than every 0.1s, to keep the game smooth.
+MISSES_FOR_MENU = 2
+HUD_CHECK_INTERVAL = 0.1
 # Max grey difference to the finger icon, as a fraction of the icon's own
 # contrast: ~0 is a perfect match, ~1 is a flat patch of its average colour.
 AUTO_MATCH_RATIO = 0.5
@@ -93,12 +101,74 @@ AUTO_HALF = 20
 # left, and the share of it that must be slate to skip the press.
 PANEL_REGION = (60, 170, 420, 560)
 PANEL_MIN_SHARE = 0.4
-# Auto Pirate: the V key chip next to the purple star icon in the top right.
-# Icons there come and go, so a band is searched: x0/x1 back from the right
-# edge and y0/y1 from the top, in pixels of a 1440-high window.
+# --- Auto Pirate (Void Sea) ---
+# The V key chip next to the purple star icon in the top right. Icons there
+# come and go, so a band is searched: x0/x1 back from the right edge and y0/y1
+# from the top, in pixels of a 1440-high window.
 PIRATE_V_BAND = (700, 243, 150, 287)
 # Wait after pressing V before looking again.
 PIRATE_V_INTERVAL = 1.0
+# A pirate D waits for the V screen after the previous one, at most this long
+# (a map takes about 2 minutes, so the first D of a map always goes).
+PIRATE_WAIT_FOR_V = 30.0
+# Void Sea screens opened by D (Seal) and V (Terminal): Esc once the user
+# clicks Confirm. Title box, from the top left of a 1440-high window, and the
+# shape score that names the screen.
+VOID_TITLE_BOX = (118, 13, 484, 72)
+VOID_TITLE_MIN_SCORE = 0.6
+# Confirm buttons, x from the window centre and y from the top, at 1440p. The
+# Seal's is fixed; the Terminal's shows under the selected card, where the
+# others have small check circles. Both take the card's colour (white, blue,
+# purple or gold), but only the button is wide: it counts if both sides of the
+# centre, just past a circle's edge, aren't the dark background there, i.e.
+# are colourful (max minus min channel) or bright (white), on average.
+SEAL_CONFIRM_BOX = (-105, 995, 105, 1062)
+TERMINAL_CARDS_X = (-448, 0, 463)
+TERMINAL_CONFIRM_HALF = 152
+TERMINAL_CONFIRM_Y = (1001, 1073)
+CONFIRM_SIDE = (72, 130)  # x range checked either side of the card centre
+CONFIRM_SIDE_HALF_HEIGHT = 17
+CONFIRM_MIN_COLOUR = 45
+CONFIRM_MIN_BRIGHT = 75  # the background beside a circle is ~55
+# First Esc after the click's release, then again while the same screen is
+# still up.
+VOID_ESC_DELAY = 0.2
+VOID_ESC_RETRY = 0.6
+VOID_ESC_TRIES = 3
+
+# --- Auto CutScene ---
+# Boss cutscenes play just before or just after a boss. Only two moments arm
+# the Esc, for CUTSCENE_WINDOW:
+# - a boss dying: its health bar at the top goes away. Every boss has the same
+#   bar (only the name above it changes): a thin band of saturated red, with
+#   no red just above and below it. Its left end, which stays red until the
+#   boss dies, is checked: x from the window centre, rows from the top, 1440p;
+# - a map being entered: a loading screen (the gold flame above its number,
+#   x from the centre, y from the bottom) gives way to the HUD. Boss intros
+#   play then.
+# It fires when the whole HUD goes away in that window: no flame icon and no
+# skill key labels (x from the centre, y from the bottom). Other HUD-less
+# moments (full-screen menus) don't come right after those, so never get it.
+BOSS_BAR_X = (-310, -240)
+BOSS_BAR_ROWS = (84, 89)
+BOSS_BAR_CLEAR_ROWS = ((72, 76), (97, 101))  # just above and below the bar
+BOSS_BAR_MIN_RED = 0.8
+BOSS_BAR_MAX_RED_AROUND = 0.2
+# A kill: the bar seen in play this many checks in a row (a fight, not a flash)
+# then gone while the HUD is still up (a menu hides both at once).
+BOSS_BAR_MIN_READS = 3
+LOADING_FLAME_BOX = (-53, -287, 95, -182)
+LOADING_MIN_SCORE = 0.8
+SKILL_KEYS_BOX = (-179, -119, 273, -81)
+SKILL_KEYS_MIN_SCORE = 0.3
+CUTSCENE_CHECK_INTERVAL = 0.2
+CUTSCENE_WINDOW = 3.0  # from the kill, or the HUD's return after loading
+CUTSCENE_HIDDEN_READS = 2  # HUD-less checks in a row before the Esc
+CUTSCENE_ESC_RETRY = 0.8  # one more Esc if the HUD is still away by then
+# No cutscene Esc this soon after the app pressed D or V: those open screens.
+CUTSCENE_AFTER_OPEN_KEY = 1.5
+
+# --- IRIS 2 ---
 # IRIS 2 Full Auto: the charge digit on the yellow badge of the right-click
 # (mouse slot) skill. Left edge and top of its 14x16 box, from the bottom
 # centre of a 1440-high window.
@@ -138,8 +208,11 @@ READY_READS = 2
 # How often Full Auto looks at the screen, the gaps between Blink presses and
 # between right clicks, and the pause between Blink going on cooldown and the
 # first right click.
-FULL_AUTO_TICK = 0.05
-FULL_AUTO_BLINK_GAP = 0.1
+FULL_AUTO_TICK = 0.1
+FULL_AUTO_BLINK_GAP = 0.05
+# How long each Blink press is held: short enough to leave the key up between
+# presses at FULL_AUTO_BLINK_GAP.
+FULL_AUTO_BLINK_HOLD = 0.025
 FULL_AUTO_CLICK_GAP = 0.7
 FULL_AUTO_DELAY = 0.3
 
@@ -160,6 +233,7 @@ def stop_sign_samples():
 STOP_SAMPLES = stop_sign_samples()
 
 VK_ESCAPE = 0x1B
+ESC_SCANCODE = 0x01
 # Keys a pause bind can use: everything except mouse buttons.
 BINDABLE_VKS = [vk for vk in range(0x08, 0xFF) if vk != VK_ESCAPE]
 # Keys whose name lookup needs the "extended" flag (arrows, Insert, ...).
@@ -177,6 +251,59 @@ except Exception:
 
 user32.GetForegroundWindow.restype = wt.HWND
 kernel32.OpenProcess.restype = wt.HANDLE
+
+
+# --- Screen capture ----------------------------------------------------------
+# ImageGrab copies the whole desktop (all monitors) and then crops: ~75ms per
+# check. Copying just the box from the screen takes about a millisecond.
+
+gdi32 = ctypes.WinDLL("gdi32")
+user32.GetDC.restype = wt.HDC
+user32.GetDC.argtypes = [wt.HWND]
+user32.ReleaseDC.argtypes = [wt.HWND, wt.HDC]
+gdi32.CreateCompatibleDC.restype = wt.HDC
+gdi32.CreateCompatibleDC.argtypes = [wt.HDC]
+gdi32.CreateCompatibleBitmap.restype = wt.HBITMAP
+gdi32.CreateCompatibleBitmap.argtypes = [wt.HDC, ctypes.c_int, ctypes.c_int]
+gdi32.SelectObject.restype = wt.HGDIOBJ
+gdi32.SelectObject.argtypes = [wt.HDC, wt.HGDIOBJ]
+gdi32.BitBlt.argtypes = [wt.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                         wt.HDC, ctypes.c_int, ctypes.c_int, wt.DWORD]
+gdi32.GetDIBits.argtypes = [wt.HDC, wt.HBITMAP, wt.UINT, wt.UINT, ctypes.c_void_p,
+                            ctypes.c_void_p, wt.UINT]
+gdi32.DeleteObject.argtypes = [wt.HGDIOBJ]
+gdi32.DeleteDC.argtypes = [wt.HDC]
+SRCCOPY = 0x00CC0020
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", wt.DWORD), ("biWidth", wt.LONG), ("biHeight", wt.LONG),
+                ("biPlanes", wt.WORD), ("biBitCount", wt.WORD),
+                ("biCompression", wt.DWORD), ("biSizeImage", wt.DWORD),
+                ("biXPelsPerMeter", wt.LONG), ("biYPelsPerMeter", wt.LONG),
+                ("biClrUsed", wt.DWORD), ("biClrImportant", wt.DWORD)]
+
+
+def grab_screen(bbox):
+    """RGB image of a box of the screen, in screen (virtual desktop) pixels."""
+    x0, y0, x1, y1 = bbox
+    w, h = x1 - x0, y1 - y0
+    screen = user32.GetDC(None)
+    mem = gdi32.CreateCompatibleDC(screen)
+    bmp = gdi32.CreateCompatibleBitmap(screen, w, h)
+    old = gdi32.SelectObject(mem, bmp)
+    try:
+        gdi32.BitBlt(mem, 0, 0, w, h, screen, x0, y0, SRCCOPY)
+        # 32-bit top-down rows (negative height), BGRX.
+        info = BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), w, -h, 1, 32)
+        buf = ctypes.create_string_buffer(w * h * 4)
+        gdi32.GetDIBits(mem, bmp, 0, h, buf, ctypes.byref(info), 0)  # DIB_RGB_COLORS
+    finally:
+        gdi32.SelectObject(mem, old)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(mem)
+        user32.ReleaseDC(None, screen)
+    return Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1)
 
 
 # --- SendInput -------------------------------------------------------------
@@ -228,10 +355,11 @@ def right_click(hold=0.03):
             time.sleep(hold)
 
 
-# --- Physical right button ---------------------------------------------------
+# --- Physical mouse buttons --------------------------------------------------
 # Full Auto sends right clicks while the user holds the right button, so the
 # button's async state can't tell whether it's still held. A low-level mouse
-# hook sees only the user's own clicks (injected ones are flagged).
+# hook sees only the user's own clicks (injected ones are flagged). It also
+# hands over the user's left clicks, for the Void Sea Confirm buttons.
 
 class MSLLHOOKSTRUCT(ctypes.Structure):
     _fields_ = [("pt", wt.POINT), ("mouseData", wt.DWORD), ("flags", wt.DWORD),
@@ -245,13 +373,17 @@ user32.CallNextHookEx.restype = wt.LPARAM
 user32.CallNextHookEx.argtypes = [wt.HHOOK, ctypes.c_int, wt.WPARAM, wt.LPARAM]
 kernel32.GetModuleHandleW.restype = wt.HMODULE
 WH_MOUSE_LL, WM_RBUTTONDOWN, WM_RBUTTONUP, LLMHF_INJECTED = 14, 0x0204, 0x0205, 0x01
+WM_LBUTTONDOWN, WM_LBUTTONUP = 0x0201, 0x0202
 
 
-class RightButton:
-    """Whether the user is physically holding the right mouse button."""
+class MouseButtons:
+    """Whether the user is physically holding the right mouse button
+    (right_held), and their left button presses and releases (left_clicks:
+    (down, x, y) in screen points, oldest first)."""
 
     def __init__(self):
-        self.held = False
+        self.right_held = False
+        self.left_clicks = []
         self.proc = HOOKPROC(self.hook)  # kept referenced while the hook lives
         threading.Thread(target=self.run, daemon=True).start()
 
@@ -259,7 +391,11 @@ class RightButton:
         if code == 0 and wparam in (WM_RBUTTONDOWN, WM_RBUTTONUP):
             info = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
             if not info.flags & LLMHF_INJECTED:
-                self.held = wparam == WM_RBUTTONDOWN
+                self.right_held = wparam == WM_RBUTTONDOWN
+        elif code == 0 and wparam in (WM_LBUTTONDOWN, WM_LBUTTONUP):
+            info = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+            if not info.flags & LLMHF_INJECTED:
+                self.left_clicks.append((wparam == WM_LBUTTONDOWN, info.pt.x, info.pt.y))
         return user32.CallNextHookEx(None, code, wparam, lparam)
 
     def run(self):
@@ -386,21 +522,18 @@ def normalised(img):
     return [(p - mean) / spread for p in px]
 
 
-def load_charge_templates():
-    return {d: normalised(half_size(Image.open(os.path.join(TEMPLATE_DIR, f"charge_{d}.png"))))
-            for d in "012"}
-
-
-def load_form_template():
-    return normalised(half_size(Image.open(os.path.join(TEMPLATE_DIR, "form.png"))))
+def load_shape_template(name):
+    """A template compared by shape (normalised correlation), at half size."""
+    return normalised(half_size(Image.open(os.path.join(TEMPLATE_DIR, name))))
 
 
 # --- Config ------------------------------------------------------------------
 
 def load_config():
-    # Settings from before 2.1 lived in %APPDATA%\TLIQSpam: keep the keys.
-    if not os.path.exists(CONFIG_PATH) and os.path.isdir(OLD_DATA_DIR) \
-            and OLD_DATA_DIR != DATA_DIR:
+    # Settings from before 2.1 lived in %APPDATA%\TLIQSpam: keep the keys. Only
+    # ever that folder is deleted, once its config is copied.
+    if (OLD_DATA_DIR and not os.path.exists(CONFIG_PATH)
+            and os.path.isdir(OLD_DATA_DIR) and OLD_DATA_DIR != DATA_DIR):
         os.makedirs(DATA_DIR, exist_ok=True)
         old = os.path.join(OLD_DATA_DIR, "config.json")
         if os.path.exists(old):
@@ -597,6 +730,10 @@ class OptionsWindow:
         add_switch("Chests & mechanics", "auto_enabled", app.toggle_auto)
         add_switch("Auto Pirate", "pirate_enabled", app.toggle_pirate)
 
+        # Auto CutScene switch.
+        section("AUTO CUTSCENE")
+        add_switch("Skip boss cutscenes", "cutscene_enabled", app.toggle_cutscene)
+
         # IRIS 2, collapsible: Full Auto and auto form, each with its key.
         head2 = tk.Frame(panel, bg=BG, cursor="hand2")
         head2.grid(row=row_no[0], column=0, sticky="we", pady=(10, 3))
@@ -691,19 +828,40 @@ class Autoloot:
         self.flame = load_flame_template()
         self.paused = False
         self.rebinding = None  # a BINDS / SEND_KEYS name while waiting for a key
+        self.mouse = MouseButtons()
+        # Auto loot: icons above D.
         self.auto_template = load_auto_template()
+        self.next_auto = 0.0
+        self.last_open_key = -CUTSCENE_AFTER_OPEN_KEY  # last D or V sent
+        # Auto Pirate.
         self.pirate_template = load_auto_template("pirate.png")
+        self.treasure_template = load_auto_template("treasure.png")
         self.pirate_v_template = load_auto_template("pirate_v.png")
         self.next_pirate_v = 0.0
         self.pirate_v_seen = False  # V icon on screen at the last check
-        self.next_auto = 0.0
-        self.charge_templates = load_charge_templates()
-        self.form_template = load_form_template()
+        self.pirate_last_d = -PIRATE_WAIT_FOR_V  # the first pirate D goes right away
+        self.v_pressed = False  # V sent, its icon not yet gone in play
+        self.v_resolved = False  # V screen dealt with since the last pirate D
+        self.void_templates = {name: load_shape_template(f"void_{name}.png")
+                               for name in ("seal", "terminal")}
+        self.void_esc = None  # (screen, next Esc time, tries left) after a Confirm
+        self.void_pressed = None  # screen whose Confirm the left button is down on
+        # Auto CutScene.
+        self.skill_keys_template = load_shape_template("skill_keys.png")
+        self.loading_template = load_shape_template("loading_flame.png")
+        self.next_cutscene_check = 0.0
+        self.loading_seen = False  # loading screen since the HUD was last up
+        self.boss_bar_reads = 0  # checks in play in a row with a boss bar
+        self.armed_until = None  # a cutscene may start until then
+        self.hud_hidden_reads = 0
+        self.cutscene_retry = None  # time of the follow-up Esc
+        # IRIS 2.
+        self.charge_templates = {d: load_shape_template(f"charge_{d}.png") for d in "012"}
+        self.form_template = load_shape_template("form.png")
         self.next_form = 0.0
         self.form_misses = 0
-        self.right_button = RightButton()
         self.fa_phase = None  # Full Auto: None, "blink", "wait" or "click"
-        self.fa_until = self.fa_next_press = self.fa_next_click = self.next_full_auto = 0.0
+        self.fa_until = self.fa_next_click = self.next_full_auto = 0.0
         self.ready_reads = READY_READS
         self.options = OptionsWindow(self)
         self.running = True
@@ -720,9 +878,9 @@ class Autoloot:
         right = ox + w
         x0, y0, x1, y1 = FLAME_BOX
         m = SEARCH_MARGIN
-        area = bright_mask(ImageGrab.grab(
-            bbox=(round(right - x0 * s) - m, round(oy + y0 * s) - m,
-                  round(right - x1 * s) + m, round(oy + y1 * s) + m), all_screens=True))
+        area = bright_mask(grab_screen(
+            (round(right - x0 * s) - m, round(oy + y0 * s) - m,
+                  round(right - x1 * s) + m, round(oy + y1 * s) + m)))
         if area[0] < self.flame[0] or len(area[1]) < len(self.flame[1]):
             return True  # window too small to compare: don't block spamming
         return best_overlap(self.flame, area) >= FLAME_MATCH
@@ -744,15 +902,16 @@ class Autoloot:
         return cx - AUTO_HALF, cy - AUTO_HALF, cx + AUTO_HALF, cy + AUTO_HALF
 
     def auto_icon_visible(self, hwnd, templates):
-        """True when one of these icons (auto_template etc.) shows above D."""
-        area = half_size(ImageGrab.grab(bbox=self.auto_box(hwnd), all_screens=True).convert("L"))
-        for tpl, contrast in templates:
+        """The one of these icons (auto_template etc.) showing above D, or None."""
+        area = half_size(grab_screen(self.auto_box(hwnd)).convert("L"))
+        for template in templates:
+            tpl, contrast = template
             if area.size != tpl.size:
                 area = area.resize(tpl.size, Image.BOX)  # window isn't 1440 high
             diff = ImageStat.Stat(ImageChops.difference(area, tpl)).mean[0]
             if diff <= contrast * AUTO_MATCH_RATIO:
-                return True
-        return False
+                return template
+        return None
 
     def pirate_v_visible(self, hwnd):
         """True when the V key chip of the pirate icon shows in the top right."""
@@ -761,9 +920,8 @@ class Autoloot:
         ox, oy = client_origin(hwnd)
         x0, y0, x1, y1 = PIRATE_V_BAND
         # Brought to 1440p, then to half size.
-        band = ImageGrab.grab(bbox=(round(ox + w - x0 * s), round(oy + y0 * s),
-                                    round(ox + w - x1 * s), round(oy + y1 * s)),
-                              all_screens=True).convert("L")
+        band = grab_screen((round(ox + w - x0 * s), round(oy + y0 * s),
+                                    round(ox + w - x1 * s), round(oy + y1 * s))).convert("L")
         band = half_size(band.resize((x0 - x1, y1 - y0), Image.BOX))
         tpl, contrast = self.pirate_v_template
         tw, th = tpl.size
@@ -774,6 +932,141 @@ class Autoloot:
                 if diff <= contrast * AUTO_MATCH_RATIO:
                     return True
         return False
+
+    def grab_1440(self, hwnd, box, x_from="centre", y_from="top"):
+        """A box of the window, given at 1440p (x from its left edge or centre,
+        y from its top or bottom), grabbed and brought to 1440p size."""
+        w, h = client_size(hwnd)
+        s = ui_scale(hwnd)
+        ox, oy = client_origin(hwnd)
+        x0, y0, x1, y1 = box
+        bx = ox + w / 2 if x_from == "centre" else ox
+        by = oy + h if y_from == "bottom" else oy
+        area = grab_screen((round(bx + x0 * s), round(by + y0 * s),
+                            round(bx + x1 * s), round(by + y1 * s)))
+        return area.resize((x1 - x0, y1 - y0), Image.BOX)
+
+    def shape_score(self, hwnd, box, template, x_from="centre", y_from="top"):
+        """Shape match (normalised correlation) of a box against a template."""
+        live = normalised(half_size(self.grab_1440(hwnd, box, x_from, y_from).convert("L")))
+        return sum(a * b for a, b in zip(live, template)) / len(live)
+
+    def void_screen(self, hwnd):
+        """"seal" or "terminal" while that Void Sea screen is up, else None."""
+        live = normalised(half_size(self.grab_1440(hwnd, VOID_TITLE_BOX, "left").convert("L")))
+        scores = {name: sum(a * b for a, b in zip(live, tpl)) / len(live)
+                  for name, tpl in self.void_templates.items()}
+        best = max(scores, key=scores.get)
+        return best if scores[best] >= VOID_TITLE_MIN_SCORE else None
+
+    def confirm_clicked(self, hwnd, screen, x, y):
+        """True when a click at screen point (x, y) hit that screen's Confirm."""
+        w, h = client_size(hwnd)
+        s = ui_scale(hwnd)
+        ox, oy = client_origin(hwnd)
+        # The click in 1440p units, x from the window centre, y from the top.
+        cx, cy = (x - ox - w / 2) / s, (y - oy) / s
+        if screen == "seal":
+            x0, y0, x1, y1 = SEAL_CONFIRM_BOX
+            return x0 <= cx <= x1 and y0 <= cy <= y1
+        y0, y1 = TERMINAL_CONFIRM_Y
+        if not y0 <= cy <= y1:
+            return False
+        mid, dy = (y0 + y1) / 2, CONFIRM_SIDE_HALF_HEIGHT
+        for card_x in TERMINAL_CARDS_X:
+            if abs(cx - card_x) <= TERMINAL_CONFIRM_HALF:
+                near, far = CONFIRM_SIDE
+                for x0, x1 in ((card_x - far, card_x - near), (card_x + near, card_x + far)):
+                    side = grab_screen((round(ox + w / 2 + x0 * s), round(oy + (mid - dy) * s),
+                                        round(ox + w / 2 + x1 * s), round(oy + (mid + dy) * s)))
+                    mean = ImageStat.Stat(side).mean
+                    if max(mean) - min(mean) < CONFIRM_MIN_COLOUR and max(mean) < CONFIRM_MIN_BRIGHT:
+                        return False
+                return True
+        return False
+
+    def void_confirm_esc(self, hwnd, state, now):
+        """Esc once the user clicks Confirm on a Void Sea screen (Seal or
+        Terminal), again a few times if that screen is still up. The button is
+        checked on the press: the Terminal's is gone within 0.1s of the release.
+        Esc waits for the release, so the click still reaches the game."""
+        clicks = self.mouse.left_clicks
+        while clicks:
+            down, x, y = clicks.pop(0)
+            if not down:
+                if self.void_pressed:
+                    self.void_esc = (self.void_pressed, now + VOID_ESC_DELAY, VOID_ESC_TRIES)
+                self.void_pressed = None
+            elif state == "menu" and self.cfg["pirate_enabled"]:
+                screen = self.void_screen(hwnd)
+                if screen and self.confirm_clicked(hwnd, screen, x, y):
+                    self.void_pressed = screen
+        if not self.void_esc or now < self.void_esc[1]:
+            return
+        screen, _, tries = self.void_esc
+        if state != "menu" or (tries < VOID_ESC_TRIES and self.void_screen(hwnd) != screen):
+            self.void_esc = None  # closed: back in play, or on to another screen
+            return
+        tap_key(ESC_SCANCODE, hold=0.05)
+        self.void_esc = (screen, now + VOID_ESC_RETRY, tries - 1) if tries > 1 else None
+
+    def boss_bar_visible(self, hwnd):
+        """True while a boss health bar shows at the top."""
+        x0, x1 = BOSS_BAR_X
+        top, bottom = BOSS_BAR_CLEAR_ROWS[0][0], BOSS_BAR_CLEAR_ROWS[1][1]
+        # One grab from above the bar to below it.
+        px = self.grab_1440(hwnd, (x0, top, x1, bottom + 1)).convert("RGB").load()
+
+        def red_share(rows):
+            r0, r1 = rows
+            cells = [px[x, y - top] for x in range(x1 - x0) for y in range(r0, r1 + 1)]
+            return sum(r > 100 and r > 2 * g and r > 2 * b for r, g, b in cells) / len(cells)
+        return (red_share(BOSS_BAR_ROWS) >= BOSS_BAR_MIN_RED
+                and all(red_share(rows) <= BOSS_BAR_MAX_RED_AROUND
+                        for rows in BOSS_BAR_CLEAR_ROWS))
+
+    def hud_hidden(self, hwnd, state):
+        """The whole HUD is away: no flame icon (a "menu" state) and no skill
+        key labels."""
+        return state == "menu" and self.shape_score(
+            hwnd, SKILL_KEYS_BOX, self.skill_keys_template, y_from="bottom") < SKILL_KEYS_MIN_SCORE
+
+    def cutscene_esc(self, hwnd, state, now):
+        """Auto CutScene: Esc to skip a cutscene, after a boss dies or on
+        entering a map (boss intros)."""
+        if not self.cfg["cutscene_enabled"] or now < self.next_cutscene_check:
+            return
+        self.next_cutscene_check = now + CUTSCENE_CHECK_INTERVAL
+        if self.cutscene_retry is not None:
+            if now >= self.cutscene_retry:
+                if self.hud_hidden(hwnd, state):
+                    tap_key(ESC_SCANCODE, hold=0.05)
+                self.cutscene_retry = None
+            return
+        if state == "spamming":
+            if self.loading_seen:
+                self.loading_seen = False
+                self.armed_until, self.hud_hidden_reads = now + CUTSCENE_WINDOW, 0
+            if self.boss_bar_visible(hwnd):
+                self.boss_bar_reads += 1
+                return
+            if self.boss_bar_reads >= BOSS_BAR_MIN_READS:
+                self.armed_until, self.hud_hidden_reads = now + CUTSCENE_WINDOW, 0
+            self.boss_bar_reads = 0
+        elif self.shape_score(hwnd, LOADING_FLAME_BOX, self.loading_template,
+                              y_from="bottom") >= LOADING_MIN_SCORE:
+            self.loading_seen, self.armed_until = True, None
+            return
+        if self.armed_until is None:
+            return
+        if now > self.armed_until:
+            self.armed_until = None
+            return
+        self.hud_hidden_reads = self.hud_hidden_reads + 1 if self.hud_hidden(hwnd, state) else 0
+        if (self.hud_hidden_reads >= CUTSCENE_HIDDEN_READS
+                and now - self.last_open_key >= CUTSCENE_AFTER_OPEN_KEY):
+            tap_key(ESC_SCANCODE, hold=0.05)
+            self.armed_until, self.cutscene_retry = None, now + CUTSCENE_ESC_RETRY
 
     def charges_at_zero(self, hwnd):
         """True when the right-click skill's charge badge reads 0."""
@@ -786,9 +1079,8 @@ class Autoloot:
         left, right = CHARGE_X - m, CHARGE_X + bw + m
         top, bottom = CHARGE_Y - m, CHARGE_Y + bh + m
         # Brought to 1440p, then to half size.
-        area = ImageGrab.grab(bbox=(round(cx + left * s), round(by + top * s),
-                                    round(cx + right * s), round(by + bottom * s)),
-                              all_screens=True).convert("L")
+        area = grab_screen((round(cx + left * s), round(by + top * s),
+                                    round(cx + right * s), round(by + bottom * s))).convert("L")
         area = half_size(area.resize((right - left, bottom - top), Image.BOX))
         tw, th = bw // 2, bh // 2
         for dx in range(m + 1):
@@ -809,9 +1101,8 @@ class Autoloot:
         slot = SLOT_OF_SCANCODE.get(self.cfg["zero_scancode"], 1)
         cx, cy = ox + w / 2 + SKILL_SLOTS_X[slot] * s, oy + h + SKILL_Y * s
         half = STOP_RADIUS + 8
-        icon = ImageGrab.grab(bbox=(round(cx - half * s), round(cy - half * s),
-                                    round(cx + half * s), round(cy + half * s)),
-                              all_screens=True).convert("RGB")
+        icon = grab_screen((round(cx - half * s), round(cy - half * s),
+                                    round(cx + half * s), round(cy + half * s))).convert("RGB")
         sat = icon.resize((2 * half, 2 * half), Image.BOX).convert("HSV").getchannel("S").load()
         grey = sum(sat[half + x, half + y] + STOP_SAT_GAP
                    < min(sat[half + ix, half + iy], sat[half + px, half + py])
@@ -831,26 +1122,33 @@ class Autoloot:
         one every FULL_AUTO_CLICK_GAP, while the right-click skill has charges.
         At 0 charges, Blink until Blink is on cooldown; then, once there are
         charges, wait FULL_AUTO_DELAY and right click again. Without charges
-        Blink keeps being pressed."""
-        if now < self.next_full_auto:
+        Blink keeps being pressed. The screen is read every FULL_AUTO_TICK;
+        Blink itself is pressed by blink_loop while the phase is "blink"."""
+        if self.fa_phase is None or now >= self.next_full_auto:
+            self.next_full_auto = now + FULL_AUTO_TICK
+            no_charges = self.charges_at_zero(hwnd)
+            if self.fa_phase == "blink" or no_charges:
+                if self.fa_phase != "blink":
+                    self.fa_phase, self.ready_reads = "blink", READY_READS
+                if self.blink_cooling(hwnd) and not no_charges:
+                    self.fa_phase, self.fa_until = "wait", now + FULL_AUTO_DELAY
+        if self.fa_phase == "blink" or (self.fa_phase == "wait" and now < self.fa_until):
             return
-        self.next_full_auto = now + FULL_AUTO_TICK
-        no_charges = self.charges_at_zero(hwnd)
-        if self.fa_phase == "blink" or no_charges:
-            if self.fa_phase != "blink":
-                self.fa_phase, self.ready_reads = "blink", READY_READS
-            if self.blink_cooling(hwnd) and not no_charges:
-                self.fa_phase, self.fa_until = "wait", now + FULL_AUTO_DELAY
-            elif now >= self.fa_next_press:
-                tap_key(self.cfg["zero_scancode"], hold=0.05)
-                self.fa_next_press = now + FULL_AUTO_BLINK_GAP
-        elif self.fa_phase == "wait" and now < self.fa_until:
-            pass
-        else:
-            self.fa_phase = "click"
-            if now >= self.fa_next_click:
-                right_click()
-                self.fa_next_click = now + FULL_AUTO_CLICK_GAP
+        self.fa_phase = "click"
+        if now >= self.fa_next_click:
+            right_click()
+            self.fa_next_click = now + FULL_AUTO_CLICK_GAP
+
+    def blink_loop(self):
+        """Full Auto's Blink presses, on their own thread so screen checks in
+        the main loop never hold them up."""
+        while self.running:
+            if self.fa_phase == "blink":
+                start = time.perf_counter()
+                tap_key(self.cfg["zero_scancode"], hold=FULL_AUTO_BLINK_HOLD)
+                time.sleep(max(0.0, start + FULL_AUTO_BLINK_GAP - time.perf_counter()))
+            else:
+                time.sleep(0.005)
 
     def form_buff_visible(self, hwnd):
         """True when the green S form buff is in any buff slot."""
@@ -861,9 +1159,8 @@ class Autoloot:
         left, right = FORM_SLOTS_X[0] - m, FORM_SLOTS_X[-1] + bw + m
         top, bottom = FORM_Y - m, FORM_Y + bh + m
         # One grab of the whole bar, brought to 1440p, then to half size.
-        strip = ImageGrab.grab(bbox=(round(ox + left * s), round(oy + top * s),
-                                     round(ox + right * s), round(oy + bottom * s)),
-                               all_screens=True).convert("L")
+        strip = grab_screen((round(ox + left * s), round(oy + top * s),
+                                     round(ox + right * s), round(oy + bottom * s))).convert("L")
         strip = half_size(strip.resize((right - left, bottom - top), Image.BOX))
         tw, th = bw // 2, bh // 2
         tpl = self.form_template
@@ -880,15 +1177,70 @@ class Autoloot:
         s = ui_scale(hwnd)
         ox, oy = client_origin(hwnd)
         x0, y0, x1, y1 = (round(v * s) for v in PANEL_REGION)
-        shot = ImageGrab.grab(bbox=(ox + x0, oy + y0, ox + x1, oy + y1),
-                              all_screens=True).convert("RGB").reduce(4)
+        shot = grab_screen((ox + x0, oy + y0, ox + x1, oy + y1)).convert("RGB").reduce(4)
         # Dark, cool grey: blue clearly above red, neither black nor bright.
         slate = sum(1 for r, g, b in shot.getdata()
                     if 30 <= max(r, g, b) <= 100 and b - r >= 12 and b >= g - 4)
         return slate >= PANEL_MIN_SHARE * shot.width * shot.height
 
+    def pirate_v_step(self, hwnd, state, now):
+        """Auto Pirate: V when the V icon shows in the top right. It's dealt
+        with once back in play with the V icon gone."""
+        if state != "spamming" or not self.cfg["pirate_enabled"]:
+            self.pirate_v_seen = False
+            return
+        if now < self.next_pirate_v:
+            return
+        self.next_pirate_v = now + 0.3
+        self.pirate_v_seen = self.pirate_v_visible(hwnd)
+        if self.pirate_v_seen:
+            tap_key(self.cfg["pirate_v_scancode"], hold=0.05)
+            self.last_open_key = now
+            self.v_pressed = True
+            self.next_pirate_v = now + PIRATE_V_INTERVAL
+        elif self.v_pressed:
+            self.v_pressed, self.v_resolved = False, True
+
+    def auto_loot_step(self, hwnd, state, now):
+        """D on the icons above the D slot, menus included: the finger
+        (chests and mechanics), and with Auto Pirate the pirate and the Void
+        Sea treasure (a plain D, like a chest).
+
+        Pirate D and V take turns: D, V, D, V... A pirate D needs the V screen
+        dealt with since the previous one, else the Seal opens with a Whisper
+        still to pick and the game shows a Tip prompt; this also keeps a closed
+        window from reopening. If no V comes, it goes PIRATE_WAIT_FOR_V after
+        the previous D, and never while the V icon shows."""
+        icons = [self.auto_template] if self.cfg["auto_enabled"] else []
+        if self.cfg["pirate_enabled"]:
+            icons.append(self.pirate_template)
+            if self.cfg["auto_enabled"]:
+                icons.append(self.treasure_template)
+        if not icons or now < self.next_auto:
+            return
+        self.next_auto = now + 0.1
+        icon = self.auto_icon_visible(hwnd, icons)
+        if icon is self.pirate_template:
+            ready = self.v_resolved or now - self.pirate_last_d >= PIRATE_WAIT_FOR_V
+            if self.pirate_v_seen or not ready:
+                icon = None
+        # The DPS meter panel shows the finger icon too: only that one is
+        # checked against it.
+        if icon and not (icon is self.auto_template and self.dps_panel_open(hwnd)):
+            # Held a bit longer than Q: interaction keys can miss a 15ms tap.
+            tap_key(self.cfg["auto_scancode"], hold=0.05)
+            self.last_open_key = now
+            if icon is self.pirate_template:
+                self.pirate_last_d = now
+                self.v_resolved = False
+            self.next_auto = now + self.cfg["auto_interval_seconds"]
+
     def toggle_auto(self):
         self.cfg["auto_enabled"] = not self.cfg["auto_enabled"]
+        save_config(self.cfg)
+
+    def toggle_cutscene(self):
+        self.cfg["cutscene_enabled"] = not self.cfg["cutscene_enabled"]
         save_config(self.cfg)
 
     def toggle_pirate(self):
@@ -978,30 +1330,14 @@ class Autoloot:
             if state == "spamming" and now >= next_tap:
                 tap_key(self.cfg["key_scancode"])
                 next_tap = now + self.cfg["interval_seconds"]
-            # Auto Pirate: V when the V icon shows in the top right. Checked
-            # first: while it shows, the pirate icon gets no D (V goes first).
-            if state != "spamming" or not self.cfg["pirate_enabled"]:
-                self.pirate_v_seen = False
-            elif now >= self.next_pirate_v:
-                self.next_pirate_v = now + 0.3
-                self.pirate_v_seen = self.pirate_v_visible(hwnd)
-                if self.pirate_v_seen:
-                    tap_key(self.cfg["pirate_v_scancode"], hold=0.05)
-                    self.next_pirate_v = now + PIRATE_V_INTERVAL
-            # Auto chest/mechanics and Auto Pirate run whenever spam is on,
-            # menus included. Both icons show at the same spot above D.
-            icons = [self.auto_template] if self.cfg["auto_enabled"] else []
-            if self.cfg["pirate_enabled"] and not self.pirate_v_seen:
-                icons.append(self.pirate_template)
-            if state in ("spamming", "menu") and icons and now >= self.next_auto:
-                self.next_auto = now + 0.1
-                if self.auto_icon_visible(hwnd, icons) and not self.dps_panel_open(hwnd):
-                    # Held a bit longer than Q: interaction keys can miss a 15ms tap.
-                    tap_key(self.cfg["auto_scancode"], hold=0.05)
-                    self.next_auto = now + self.cfg["auto_interval_seconds"]
+            if state in ("spamming", "menu"):
+                self.pirate_v_step(hwnd, state, now)
+                self.auto_loot_step(hwnd, state, now)
+                self.void_confirm_esc(hwnd, state, now)
+                self.cutscene_esc(hwnd, state, now)
             # IRIS 2 Full Auto, while the right button is held.
             if (state == "spamming" and self.cfg["auto_enabled"]
-                    and self.cfg["full_auto"] and self.right_button.held):
+                    and self.cfg["full_auto"] and self.mouse.right_held):
                 self.full_auto_step(hwnd, now)
             else:
                 self.fa_phase = None
@@ -1033,6 +1369,7 @@ class Autoloot:
         def setup(icon):
             icon.visible = True
             threading.Thread(target=self.loop, daemon=True).start()
+            threading.Thread(target=self.blink_loop, daemon=True).start()
 
         self.icon.run(setup=setup)
 
