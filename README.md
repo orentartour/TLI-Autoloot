@@ -7,6 +7,9 @@ window it:
   the flame icon in the top-right HUD disappears.
 - **Auto loots:** presses D while the grey finger icon above the D slot is on
   screen, but not while the DPS meter panel is open.
+- **Auto Pirate** (off by default): presses D while the purple pirate icon is
+  above the D slot, and V while the purple star icon with a V shows in the top
+  right. V goes first: while the V icon shows, the pirate icon gets no D.
 
 ## IRIS 2
 
@@ -46,7 +49,7 @@ Left-click the tray icon to open the Options panel. From there you can:
 
 - rebind Pause / resume (F8 by default), Spam and Loot: click a key, then
   press the new one (Esc cancels)
-- switch chests & mechanics looting on or off
+- switch chests & mechanics looting and Auto Pirate on or off
 - open the IRIS 2 section (click its header) to turn Full Auto and Auto Form
   on or off, and rebind Blink and Form
 

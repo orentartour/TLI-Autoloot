@@ -52,6 +52,8 @@ DEFAULT_CONFIG = {
     "key_scancode": 0x1E,  # physical key that types Q on AZERTY
     "pause_vk": 0x77,  # F8
     "auto_enabled": True,
+    "pirate_enabled": False,  # D on the purple pirate icon, same spot
+    "pirate_v_scancode": 0x2F,  # V, pressed on the pirate V icon (top right)
     "auto_scancode": 0x20,  # D
     "auto_interval_seconds": 0.3,
     "zero_scancode": 0x10,  # Blink: physical key that types A on AZERTY
@@ -91,6 +93,12 @@ AUTO_HALF = 20
 # left, and the share of it that must be slate to skip the press.
 PANEL_REGION = (60, 170, 420, 560)
 PANEL_MIN_SHARE = 0.4
+# Auto Pirate: the V key chip next to the purple star icon in the top right.
+# Icons there come and go, so a band is searched: x0/x1 back from the right
+# edge and y0/y1 from the top, in pixels of a 1440-high window.
+PIRATE_V_BAND = (700, 243, 150, 287)
+# Wait after pressing V before looking again.
+PIRATE_V_INTERVAL = 1.0
 # IRIS 2 Full Auto: the charge digit on the yellow badge of the right-click
 # (mouse slot) skill. Left edge and top of its 14x16 box, from the bottom
 # centre of a 1440-high window.
@@ -362,9 +370,10 @@ def half_size(img):
     return img.resize((img.width // 2, img.height // 2), Image.BOX)
 
 
-def load_auto_template():
-    """The finger icon in grey (half size), with its mean deviation from its average."""
-    img = half_size(Image.open(os.path.join(TEMPLATE_DIR, "auto.png")).convert("L"))
+def load_auto_template(name="auto.png"):
+    """An icon above D (finger or pirate) in grey (half size), with its mean
+    deviation from its average."""
+    img = half_size(Image.open(os.path.join(TEMPLATE_DIR, name)).convert("L"))
     flat = Image.new("L", img.size, round(ImageStat.Stat(img).mean[0]))
     return img, max(ImageStat.Stat(ImageChops.difference(img, flat)).mean[0], 1.0)
 
@@ -586,6 +595,7 @@ class OptionsWindow:
             sw.create_oval(x, 2, x + 14, 16, fill=FG if on else DIM, outline="")
 
         add_switch("Chests & mechanics", "auto_enabled", app.toggle_auto)
+        add_switch("Auto Pirate", "pirate_enabled", app.toggle_pirate)
 
         # IRIS 2, collapsible: Full Auto and auto form, each with its key.
         head2 = tk.Frame(panel, bg=BG, cursor="hand2")
@@ -682,6 +692,10 @@ class Autoloot:
         self.paused = False
         self.rebinding = None  # a BINDS / SEND_KEYS name while waiting for a key
         self.auto_template = load_auto_template()
+        self.pirate_template = load_auto_template("pirate.png")
+        self.pirate_v_template = load_auto_template("pirate_v.png")
+        self.next_pirate_v = 0.0
+        self.pirate_v_seen = False  # V icon on screen at the last check
         self.next_auto = 0.0
         self.charge_templates = load_charge_templates()
         self.form_template = load_form_template()
@@ -729,13 +743,37 @@ class Autoloot:
         cx, cy = round(ox + w / 2 + dx * s), round(oy + h + dy * s)
         return cx - AUTO_HALF, cy - AUTO_HALF, cx + AUTO_HALF, cy + AUTO_HALF
 
-    def auto_icon_visible(self, hwnd):
-        tpl, contrast = self.auto_template
+    def auto_icon_visible(self, hwnd, templates):
+        """True when one of these icons (auto_template etc.) shows above D."""
         area = half_size(ImageGrab.grab(bbox=self.auto_box(hwnd), all_screens=True).convert("L"))
-        if area.size != tpl.size:
-            area = area.resize(tpl.size, Image.BOX)  # window isn't 1440 high
-        diff = ImageStat.Stat(ImageChops.difference(area, tpl)).mean[0]
-        return diff <= contrast * AUTO_MATCH_RATIO
+        for tpl, contrast in templates:
+            if area.size != tpl.size:
+                area = area.resize(tpl.size, Image.BOX)  # window isn't 1440 high
+            diff = ImageStat.Stat(ImageChops.difference(area, tpl)).mean[0]
+            if diff <= contrast * AUTO_MATCH_RATIO:
+                return True
+        return False
+
+    def pirate_v_visible(self, hwnd):
+        """True when the V key chip of the pirate icon shows in the top right."""
+        w, h = client_size(hwnd)
+        s = ui_scale(hwnd)
+        ox, oy = client_origin(hwnd)
+        x0, y0, x1, y1 = PIRATE_V_BAND
+        # Brought to 1440p, then to half size.
+        band = ImageGrab.grab(bbox=(round(ox + w - x0 * s), round(oy + y0 * s),
+                                    round(ox + w - x1 * s), round(oy + y1 * s)),
+                              all_screens=True).convert("L")
+        band = half_size(band.resize((x0 - x1, y1 - y0), Image.BOX))
+        tpl, contrast = self.pirate_v_template
+        tw, th = tpl.size
+        for x in range(band.width - tw + 1):
+            for y in range(band.height - th + 1):
+                diff = ImageStat.Stat(ImageChops.difference(
+                    band.crop((x, y, x + tw, y + th)), tpl)).mean[0]
+                if diff <= contrast * AUTO_MATCH_RATIO:
+                    return True
+        return False
 
     def charges_at_zero(self, hwnd):
         """True when the right-click skill's charge badge reads 0."""
@@ -853,6 +891,10 @@ class Autoloot:
         self.cfg["auto_enabled"] = not self.cfg["auto_enabled"]
         save_config(self.cfg)
 
+    def toggle_pirate(self):
+        self.cfg["pirate_enabled"] = not self.cfg["pirate_enabled"]
+        save_config(self.cfg)
+
     def toggle_full_auto(self):
         self.cfg["full_auto"] = not self.cfg["full_auto"]
         save_config(self.cfg)
@@ -936,11 +978,24 @@ class Autoloot:
             if state == "spamming" and now >= next_tap:
                 tap_key(self.cfg["key_scancode"])
                 next_tap = now + self.cfg["interval_seconds"]
-            # Auto chest/mechanics runs whenever spam is on, menus included.
-            if (state in ("spamming", "menu") and self.cfg["auto_enabled"]
-                    and now >= self.next_auto):
+            # Auto Pirate: V when the V icon shows in the top right. Checked
+            # first: while it shows, the pirate icon gets no D (V goes first).
+            if state != "spamming" or not self.cfg["pirate_enabled"]:
+                self.pirate_v_seen = False
+            elif now >= self.next_pirate_v:
+                self.next_pirate_v = now + 0.3
+                self.pirate_v_seen = self.pirate_v_visible(hwnd)
+                if self.pirate_v_seen:
+                    tap_key(self.cfg["pirate_v_scancode"], hold=0.05)
+                    self.next_pirate_v = now + PIRATE_V_INTERVAL
+            # Auto chest/mechanics and Auto Pirate run whenever spam is on,
+            # menus included. Both icons show at the same spot above D.
+            icons = [self.auto_template] if self.cfg["auto_enabled"] else []
+            if self.cfg["pirate_enabled"] and not self.pirate_v_seen:
+                icons.append(self.pirate_template)
+            if state in ("spamming", "menu") and icons and now >= self.next_auto:
                 self.next_auto = now + 0.1
-                if self.auto_icon_visible(hwnd) and not self.dps_panel_open(hwnd):
+                if self.auto_icon_visible(hwnd, icons) and not self.dps_panel_open(hwnd):
                     # Held a bit longer than Q: interaction keys can miss a 15ms tap.
                     tap_key(self.cfg["auto_scancode"], hold=0.05)
                     self.next_auto = now + self.cfg["auto_interval_seconds"]
